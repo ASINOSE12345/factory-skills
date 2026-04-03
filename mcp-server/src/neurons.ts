@@ -3,7 +3,7 @@
  */
 
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, statSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, dirname, resolve } from "node:path";
 import matter from "gray-matter";
 
 export interface NeuronFrontmatter {
@@ -50,19 +50,22 @@ const CATEGORY_DIRS: NeuronCategory[] = ["errors", "decisions", "patterns", "fou
  * Resolve the neurons directory from a project root
  */
 export function resolveNeuronsDir(projectRoot: string): string | null {
-  const candidates = [
-    join(projectRoot, "neurons"),
-    join(projectRoot, "..", "neurons"),
-  ];
+  // Walk up the directory tree looking for a neurons/ directory
+  let current = resolve(projectRoot);
+  const root = dirname(current) === current ? current : "/";
+  while (current !== root) {
+    const candidate = join(current, "neurons");
+    if (existsSync(candidate)) return candidate;
+    current = dirname(current);
+  }
 
+  // Fallback to FACTORY_ROOT env var
   const envRoot = process.env.FACTORY_ROOT;
   if (envRoot) {
-    candidates.push(join(envRoot, "neurons"));
+    const envCandidate = join(envRoot, "neurons");
+    if (existsSync(envCandidate)) return envCandidate;
   }
 
-  for (const dir of candidates) {
-    if (existsSync(dir)) return dir;
-  }
   return null;
 }
 

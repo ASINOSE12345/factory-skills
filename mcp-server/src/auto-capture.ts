@@ -46,6 +46,19 @@ interface HookInput {
     file_path?: string;
     [key: string]: unknown;
   };
+  // PostToolUse (success) — Claude Code format
+  tool_response?: {
+    stdout?: string;
+    stderr?: string;
+    interrupted?: boolean;
+    isImage?: boolean;
+    noOutputExpected?: boolean;
+    [key: string]: unknown;
+  };
+  // PostToolUseFailure — Claude Code format
+  error?: string;
+  is_interrupt?: boolean;
+  // Legacy format — keep for backwards compat (manual testing)
   tool_output?: {
     stdout?: string;
     stderr?: string;
@@ -297,7 +310,16 @@ function classifyError(command: string, stderr: string, exitCode: number): Error
 
   // Generic error — only if exit code ≠ 0 and there's meaningful stderr
   if (exitCode !== 0 && stderr.trim().length > 10) {
-    const firstLine = stderr.trim().split("\n")[0].slice(0, 100);
+    // Find the most informative line (skip stack trace, blank lines, code pointers)
+    const lines = stderr.trim().split("\n");
+    const infoLine = lines.find((l) =>
+      l.trim().length > 5 &&
+      !/^\s+at\s/.test(l) &&       // skip stack traces
+      !/^\s*\^+\s*$/.test(l) &&    // skip error pointers (^^^)
+      !/^\s*\d+\s*\|/.test(l) &&   // skip source code lines
+      !/^Node\.js v/.test(l)        // skip Node version
+    ) ?? lines[0];
+    const firstLine = infoLine.trim().slice(0, 100);
     const fingerprint = createHash("md5")
       .update(`generic:${firstLine}`)
       .digest("hex")
@@ -319,9 +341,16 @@ function classifyError(command: string, stderr: string, exitCode: number): Error
 }
 
 function shouldIgnore(command: string, stderr: string, exitCode: number): boolean {
+  // For compound commands (cd && ..., cd ; ...), check the LAST segment
+  const cmdToCheck = command.includes("&&")
+    ? command.split("&&").pop()!.trim()
+    : command.includes(";")
+      ? command.split(";").pop()!.trim()
+      : command.trim();
+
   // Ignore whitelisted commands
   for (const pattern of IGNORE_COMMANDS) {
-    if (pattern.test(command.trim())) return true;
+    if (pattern.test(cmdToCheck)) return true;
   }
 
   // Ignore if exit code is 0 (success)
@@ -418,9 +447,24 @@ async function main() {
   }
 
   const command = input.tool_input?.command ?? "";
-  const stdout = input.tool_output?.stdout ?? "";
-  const stderr = input.tool_output?.stderr ?? "";
-  const exitCode = input.tool_output?.exit_code ?? 0;
+  const isFailure = input.hook_event_name === "PostToolUseFailure";
+
+  // Build stderr from the right source depending on hook type
+  let stderr: string;
+  let exitCode: number;
+
+  if (isFailure) {
+    // PostToolUseFailure: error is a string, no tool_response
+    // Strip "Exit code N\n" prefix — Claude Code prepends it
+    stderr = (input.error ?? "").replace(/^Exit code \d+\n/, "");
+    exitCode = 1;
+  } else {
+    // PostToolUse (success) or legacy format
+    const response = input.tool_response ?? input.tool_output ?? {};
+    stderr = response.stderr ?? (response as Record<string, unknown>).content as string ?? "";
+    exitCode = (response as Record<string, unknown>).exit_code as number
+      ?? (stderr.trim().length > 0 ? 1 : 0);
+  }
 
   // Check if we should ignore this command
   if (shouldIgnore(command, stderr, exitCode)) {
@@ -436,6 +480,8 @@ async function main() {
   ensureNeuronsDir(neuronsDir);
 
   // Classify the error
+  // For PostToolUse success events, also check stdout for error patterns
+  const stdout = input.tool_response?.stdout ?? input.tool_output?.stdout ?? "";
   const errorSig = classifyError(command, stderr || stdout, exitCode);
   if (!errorSig) {
     process.exit(0);
