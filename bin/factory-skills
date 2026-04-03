@@ -212,6 +212,8 @@ anonymize_pattern() {
     content="$(echo "$content" | sed -E 's/^project:.*$/project: [redacted]/')"
     content="$(echo "$content" | sed -E 's/^derived_from:.*$/derived_from: [ref]/')"
     content="$(echo "$content" | sed -E 's/^issue:.*$/issue: [ref]/')"
+    # Strip project names from tags array
+    content="$(echo "$content" | sed -E 's/^tags:.*$/tags: [neuron, pattern]/')"
 
     # 2. Strip issue references: #123, [[#123]], Refs #42
     content="$(echo "$content" | sed -E 's/\[\[#?[A-Za-z]*-?[0-9]+\]\]/[[ref]]/g')"
@@ -228,18 +230,27 @@ anonymize_pattern() {
     content="$(echo "$content" | sed -E 's/NE-[0-9]+/NE-ref/g')"
     content="$(echo "$content" | sed -E 's/ND-[0-9]+/ND-ref/g')"
 
-    # 5. Strip Supabase project refs and long hex/alphanumeric tokens
+    # 5. Strip infrastructure identifiers
     content="$(echo "$content" | sed -E 's/--project-ref [a-zA-Z0-9]+/--project-ref [ref]/g')"
+    content="$(echo "$content" | sed -E 's/--scope [a-zA-Z0-9_-]+/--scope [ref]/g')"
     content="$(echo "$content" | sed -E 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[uuid]/g')"
 
-    # 6. Strip date cross-references
+    # 6. Strip URLs (https://..., http://..., domains like staging.X.com)
+    content="$(echo "$content" | sed -E 's|https?://[a-zA-Z0-9._/-]+|[url]|g')"
+    content="$(echo "$content" | sed -E 's/[a-zA-Z0-9-]+\.(com|io|dev|app|org|net|co)(\/[a-zA-Z0-9_./-]*)?/[domain]/g')"
+
+    # 7. Strip environment variable names that look project-specific
+    content="$(echo "$content" | sed -E 's/[A-Z][A-Z0-9_]{2,}_?(SECRET|TOKEN|KEY|PASSWORD|CREDENTIAL|API_KEY)[A-Z0-9_]*/[ENV_VAR]/g')"
+    content="$(echo "$content" | sed -E 's/(SUPABASE|VERCEL|RAILWAY|SENDGRID|STRIPE|OPENAI|ANTHROPIC|META|WHATSAPP|SLACK|DISCORD|TWILIO|AWS|GCP|AZURE|FIREBASE)[A-Z0-9_]*/[ENV_VAR]/g')"
+
+    # 8. Strip date cross-references
     content="$(echo "$content" | sed -E 's/\[\[20[0-9]{2}-[0-9]{2}-[0-9]{2}\]\]/[[date]]/g')"
     content="$(echo "$content" | sed -E 's/20[0-9]{2}-[0-9]{2}-[0-9]{2}/[date]/g')"
 
-    # 7. Generate community header
+    # 9. Generate community header
     local community_id="CP-$(date +%Y%m%d)-$(openssl rand -hex 3)"
 
-    # 8. Extract body (everything after second ---)
+    # 10. Extract body (everything after second ---)
     local body
     body="$(echo "$content" | awk 'BEGIN{n=0} /^---$/{n++; if(n==2){found=1; next}} found{print}')"
 
