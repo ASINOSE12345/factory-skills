@@ -4,7 +4,7 @@
 
 Your AI agent forgets everything when a session ends. These skills fix that — turning every error, every decision, and every pattern into institutional knowledge that persists and improves across sessions.
 
-Built by [JB Coding IoT](https://github.com/ASINOSE12345) — battle-tested across 35+ sessions, 520+ neurons, and 3 production projects.
+Built by [JB Coding IoT](https://github.com/ASINOSE12345) — battle-tested across 1035+ sessions, 520+ neurons, and 17 production projects.
 
 ---
 
