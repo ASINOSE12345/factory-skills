@@ -297,11 +297,20 @@ The bootstrap protocol runs BEFORE any action — not after, not "when convenien
 - Neurons and PROJECT_MEMORY are the **real** persistent memory
 - Acting without reading state leads to duplicate work, wrong branches, stale PRs
 
+**Real incident (2026-04-02):** Agent acted without bootstrap — changed an environment variable name (`WHATSAPP_APP_SECRET` → `META_APP_SECRET`) without reading the neuron that documented the correct name. This broke the WhatsApp webhook, caused ~20 consecutive 401 errors that triggered Meta's exponential backoff, and required multiple corrections from the operator. The memory had the answer. Reading it first would have prevented the entire incident.
+
 ### Close is Non-Negotiable
 The close protocol runs BEFORE ending — not "if I remember", not "next time". This exists because:
 - If you don't capture what happened, the next session starts blind
 - PROJECT_MEMORY.md is the single source of truth for project state
 - Session logs in MEMORY.md create an audit trail
+
+### NEVER Use Write on Memory Files — Only Edit
+Memory files (PROJECT_MEMORY.md, MEMORY.md, files in `memory/`) must ONLY be modified with surgical `Edit` operations, never with `Write` (which overwrites the entire file). This exists because:
+- `Write` replaces the entire file content — one wrong call erases all accumulated state
+- `Edit` modifies specific sections, preserving everything else
+
+**Real incident (2026-04-02):** `Write` was used on PROJECT_MEMORY.md, erasing the entire document. Recovered via `git checkout`. Rule: always ask operator permission before modifying any state file.
 
 ### Single Source of Truth
 - **PROJECT_MEMORY.md** is authoritative for project state
@@ -319,6 +328,8 @@ The close protocol runs BEFORE ending — not "if I remember", not "next time". 
 | Create multiple memory systems | One PROJECT_MEMORY per project, one MEMORY.md for factory |
 | Store code patterns in memory | Use neurons for patterns; memory is for state and decisions |
 | Forget to update board state | Board must reflect reality after every session |
+| Use `Write` to update memory files | Use `Edit` for surgical changes (`Write` overwrites entire file, risk of data loss) |
+| Act without reading memory first | Always bootstrap — the memory has the answers you need |
 
 ---
 
@@ -339,4 +350,4 @@ They complement each other — Project Memory is the **state**, Neuron System is
 
 ## Built With
 
-Created by [JB Coding IoT](https://github.com/ASINOSE12345) — proven across 25+ sessions, 2 production projects, and 0 lost context incidents since implementation.
+Created by [JB Coding IoT](https://github.com/ASINOSE12345) — proven across 35+ sessions, 3 production projects (UrbanVista Capital, PeopleSynapse, Olgui's Class), and 0 lost context incidents since implementation.

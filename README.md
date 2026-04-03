@@ -2,7 +2,7 @@
 
 **Persistent learning and memory skills for AI coding agents.**
 
-Built by [JB Coding IoT](https://github.com/ASINOSE12345) — battle-tested across 25+ sessions, 300+ neurons, and 2 production projects.
+Built by [JB Coding IoT](https://github.com/ASINOSE12345) — battle-tested across 35+ sessions, 520+ neurons, and 3 production projects.
 
 ---
 
@@ -94,12 +94,14 @@ The result: **zero lost-context incidents** since implementation, and an error r
 
 | Metric | Value |
 |--------|-------|
-| Sessions tested | 25+ |
-| Error neurons created | 175 |
-| Decision neurons recorded | 146 |
-| Active patterns | 25 |
-| Cross-project patterns | 5 |
-| Production projects | 2 |
+| Sessions tested | 35+ |
+| Error neurons (NE) | 260 |
+| Decision neurons (ND) | 237 |
+| Pattern neurons (NP) | 13 |
+| Foundation neurons (NF) | 10 |
+| **Total neurons** | **520** |
+| Cross-project patterns (PAT-FX) | 22 |
+| Production projects | 3 |
 | Lost context incidents (post-implementation) | 0 |
 
 ---
@@ -121,4 +123,4 @@ MIT
 
 ---
 
-Built with care by **JB Coding IoT** — makers of [PeopleSynapse](https://github.com/ASINOSE12345/PeopleSynapse) and [UrbanVista Capital](https://github.com/ASINOSE12345/UrbanVistaCapital-portal-inmobiliario).
+Built with care by **JB Coding IoT** — makers of [PeopleSynapse](https://github.com/ASINOSE12345/PeopleSynapse), [UrbanVista Capital](https://github.com/ASINOSE12345/UrbanVistaCapital-portal-inmobiliario), and [Olgui's Class](https://github.com/ASINOSE12345/Olgui-s_Class).

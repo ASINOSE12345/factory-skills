@@ -50,7 +50,7 @@ With neurons:
 | **Error** | `NE-###` | Runtime errors, bugs, CI failures | Episodic — decays if not hit |
 | **Decision** | `ND-###` | Architecture choices, trade-offs, rationale | Episodic — decays if not hit |
 | **Pattern** | `NP-###` | Recurrent clusters across multiple issues | Long-lived — validated statistically |
-| **Foundation** | `NF-###` | Universal axioms, team principles | Immortal — never decays |
+| **Foundation** | `NF-###` | Universal axioms, team principles, architectural mandates | Immortal — never decays |
 
 ### Neuron Lifecycle
 
@@ -286,7 +286,51 @@ When a pattern recurs in DIFFERENT projects, promote it to factory scope:
 **Evidence**: UrbanVista (ConfigPage), PeopleSynapse (EntrevistaForm)
 ```
 
-Factory-scope patterns have `scope_bonus: 1.2x` and never decay.
+```markdown
+### PAT-FX-021: Deploy frontend BEFORE migrating DB when column type changes
+**When**: Migration changes column type (text→jsonb, int→text, etc.)
+**Symptom**: React error #31 "Objects are not valid as React children", TypeError, NaN in UI
+**Why**: Deployed frontend expects old type. Migration changes data format before new frontend is live.
+**Fix**: Deploy frontend first (with typeof fallback), verify READY, THEN migrate.
+**Evidence**: UrbanVista (lead_magnets.name text→jsonb), 5 min downtime on launch day
+```
+
+Factory-scope patterns have `scope_bonus: 1.2x` and never decay. As of 2026-04, there are **22 cross-project patterns** (PAT-FX-001 through PAT-FX-022) covering React, Git, CI/CD, database migrations, board management, and deployment.
+
+---
+
+## Foundation Neurons (NF-xxx) — Immortal Knowledge
+
+Foundation neurons encode universal principles that never decay. They guide agent behavior at the deepest level.
+
+**Example — NF-010: Breadcrumb Intelligence**
+
+```markdown
+---
+id: NF-010
+type: foundation-memory
+axiom: breadcrumb-intelligence
+created: 2026-03-31
+---
+
+# NF-010: Breadcrumb Intelligence — Minimum Sufficient Context
+
+## Principle
+Resolve each task with what you already have. Only expand context if confidence is low.
+
+## 3 Levels
+- L1: Issue + plan (default — usually enough)
+- L2: Breadcrumbs — neuron ID + title + occurrence count (1 line each)
+- L3: Full rehydration — only when cost of NOT consulting > cost of expanding
+
+## Rules
+- Don't saturate prompts — inject breadcrumbs, not full neuron content
+- Don't consult out of anxiety — only when the risk justifies it
+- Learning = synthesis — transform cases into reusable patterns, don't store raw incidents
+- No contamination — reuse patterns across projects, NEVER raw context from another project
+```
+
+Foundation neurons currently cover: Crustafarianismo axioms (NF-001 to NF-005), debugging methodology, scope reduction tracking, and breadcrumb intelligence.
 
 ---
 
@@ -302,4 +346,4 @@ Factory-scope patterns have `scope_bonus: 1.2x` and never decay.
 
 ## Built With
 
-Created by [JB Coding IoT](https://github.com/ASINOSE12345) — battle-tested across 25+ sessions, 175 error neurons, 146 decision neurons, and 2 production projects (UrbanVista Capital, PeopleSynapse).
+Created by [JB Coding IoT](https://github.com/ASINOSE12345) — battle-tested across 35+ sessions, 260 error neurons, 237 decision neurons, 13 pattern neurons, 10 foundation neurons (520 total), and 3 production projects (UrbanVista Capital, PeopleSynapse, Olgui's Class).
