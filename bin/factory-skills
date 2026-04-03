@@ -52,36 +52,42 @@ extract_domains() {
 
 cmd_help() {
     cat <<'EOF'
-factory-skills — Community feedback tools for the neuron system
+factory-skills — Persistent learning memory for AI coding agents
 
 USAGE:
-    factory-skills <command>
+    factory-skills <command> [options]
 
 COMMANDS:
-    stats       Report anonymous aggregate stats from your neurons/ directory.
-                Collects ONLY: counts per type, session count, top domains.
-                Sends NO content, NO project names, NO file paths, NO code.
+    init [path]   Set up factory-skills in a project (creates neurons/,
+                  installs hooks, configures MCP server). Run once per project.
 
-    contribute  Share your pattern neurons (NP-*.md) with the community.
-                Each pattern is anonymized and shown to you for approval
-                BEFORE submission. You control exactly what gets shared.
+    bootstrap     Output neuron context for session injection.
+                  Called automatically by Claude Code hooks.
 
-    help        Show this help message.
+    stats         Report anonymous aggregate stats (opt-in).
+                  Sends ONLY counts — no content, no names, no paths.
+
+    contribute    Share anonymized patterns with the community (opt-in).
+                  You review and approve each pattern before submission.
+
+    help          Show this help message.
+
+QUICK START:
+    1. factory-skills init          # Set up in current project
+    2. Start a new AI session       # Bootstrap loads automatically
+    3. Work normally                # Agent searches/creates neurons
+    4. End session                  # Knowledge is captured
 
 REQUIREMENTS:
-    - gh CLI (https://cli.github.com) — authenticated with GitHub
-    - A neurons/ directory in the current project or $FACTORY_ROOT
-
-PRIVACY:
-    - stats:      ONLY aggregate numbers. Zero content transmitted.
-    - contribute:  YOU review every pattern before submission.
-                   Automated stripping + manual approval = zero leaks.
-    - Nothing is ever sent without your explicit [y] confirmation.
+    - Node.js >= 20 (for MCP server)
+    - gh CLI (only for stats/contribute commands)
 
 EXAMPLES:
+    factory-skills init
+    factory-skills init /path/to/project
+    factory-skills bootstrap
     factory-skills stats
     factory-skills contribute
-    FACTORY_ROOT=/path/to/workspace factory-skills stats
 EOF
 }
 
@@ -397,11 +403,321 @@ ${#approved_files[@]} anonymized pattern(s) from a factory-skills user.
     rm -rf "$tmpdir" "$clone_dir"
 }
 
+# ─── Command: init ───────────────────────────────────────────
+
+cmd_init() {
+    local project_root="${1:-.}"
+    project_root="$(cd "$project_root" && pwd)"
+
+    echo "=== Factory Skills — Init ==="
+    echo "Project root: $project_root"
+    echo ""
+
+    # 1. Create neurons directory structure
+    local neurons_dir="$project_root/neurons"
+    echo "Creating neurons directory structure..."
+    mkdir -p "$neurons_dir"/{errors,decisions,patterns,foundations}
+    echo "  ✓ neurons/{errors,decisions,patterns,foundations}"
+
+    # 2. Detect agent type
+    local agent=""
+    local agent_config=""
+
+    if [[ -d "$project_root/.claude" ]] || command -v claude &>/dev/null; then
+        agent="claude-code"
+        agent_config="$project_root/.claude"
+    fi
+    if [[ -d "$project_root/.cursor" ]]; then
+        agent="cursor"
+        agent_config="$project_root/.cursor/rules"
+    fi
+    if [[ -d "$project_root/.gemini" ]]; then
+        agent="gemini-cli"
+        agent_config="$project_root/.gemini/instructions"
+    fi
+
+    if [[ -z "$agent" ]]; then
+        echo ""
+        echo "  No AI agent detected. Which do you use?"
+        echo "    1) Claude Code"
+        echo "    2) Cursor"
+        echo "    3) Gemini CLI"
+        echo "    4) Other / Skip"
+        read -rp "  Choose [1-4]: " agent_choice
+        case "$agent_choice" in
+            1) agent="claude-code"; agent_config="$project_root/.claude" ;;
+            2) agent="cursor"; agent_config="$project_root/.cursor/rules" ;;
+            3) agent="gemini-cli"; agent_config="$project_root/.gemini/instructions" ;;
+            *) agent="other" ;;
+        esac
+    fi
+
+    echo "  ✓ Agent detected: $agent"
+
+    # 3. Install hooks for Claude Code
+    if [[ "$agent" == "claude-code" ]]; then
+        install_claude_hooks "$project_root"
+    fi
+
+    # 4. Inject bootstrap instructions
+    if [[ "$agent" != "other" ]]; then
+        inject_bootstrap_instructions "$project_root" "$agent" "$agent_config"
+    fi
+
+    # 5. Create .gitignore for neurons (optional — user decides)
+    if [[ ! -f "$neurons_dir/.gitignore" ]]; then
+        echo ""
+        read -rp "Add neurons/ to .gitignore? (keeps neurons private) [Y/n] " gi_choice
+        if [[ "$gi_choice" != "n" && "$gi_choice" != "N" ]]; then
+            # Add to project .gitignore
+            if [[ -f "$project_root/.gitignore" ]]; then
+                if ! grep -q "^neurons/" "$project_root/.gitignore" 2>/dev/null; then
+                    echo -e "\n# Factory Skills — neuron system (private knowledge)\nneurons/" >> "$project_root/.gitignore"
+                fi
+            else
+                echo -e "# Factory Skills — neuron system (private knowledge)\nneurons/" > "$project_root/.gitignore"
+            fi
+            echo "  ✓ neurons/ added to .gitignore"
+        fi
+    fi
+
+    # 6. Setup MCP server config
+    setup_mcp_config "$project_root"
+
+    echo ""
+    echo "┌─────────────────────────────────────────────────┐"
+    echo "│  ✅ Factory Skills initialized!                 │"
+    echo "│                                                 │"
+    echo "│  Your agent now has persistent memory.          │"
+    echo "│                                                 │"
+    echo "│  What happens next:                             │"
+    echo "│  • Session start → bootstrap loads prior        │"
+    echo "│    knowledge automatically                      │"
+    echo "│  • During work → agent searches neurons         │"
+    echo "│    before implementing                          │"
+    echo "│  • Session end → new errors and decisions       │"
+    echo "│    are captured as neurons                      │"
+    echo "│                                                 │"
+    echo "│  Start a new session to see it in action.       │"
+    echo "└─────────────────────────────────────────────────┘"
+}
+
+install_claude_hooks() {
+    local project_root="$1"
+    local hooks_dir="$project_root/.claude"
+    mkdir -p "$hooks_dir"
+
+    local hooks_file="$hooks_dir/hooks.json"
+    local factory_skills_bin
+    factory_skills_bin="$(cd "$(dirname "$0")" && pwd)/factory-skills"
+
+    echo ""
+    echo "Installing Claude Code hooks..."
+
+    # Determine node path
+    local node_path
+    node_path="$(command -v node 2>/dev/null || echo "/usr/local/bin/node")"
+
+    # Determine MCP server path
+    local mcp_server_dir
+    mcp_server_dir="$(cd "$(dirname "$0")/../mcp-server" && pwd 2>/dev/null || echo "")"
+
+    if [[ -f "$hooks_file" ]]; then
+        echo "  ⚠ hooks.json already exists — skipping to avoid overwrite"
+        echo "  Add these hooks manually if needed:"
+        echo ""
+        echo "  SessionStart: node $mcp_server_dir/dist/bootstrap-hook.js"
+        return 0
+    fi
+
+    cat > "$hooks_file" << HOOKEOF
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$node_path $mcp_server_dir/dist/bootstrap-hook.js $project_root"
+          }
+        ]
+      }
+    ]
+  }
+}
+HOOKEOF
+
+    echo "  ✓ hooks.json created with SessionStart bootstrap"
+}
+
+inject_bootstrap_instructions() {
+    local project_root="$1"
+    local agent="$2"
+    local agent_config="$3"
+
+    local instructions=""
+    read -r -d '' instructions << 'INSTREOF' || true
+## Neuron System — Persistent Memory (AUTO-INJECTED by factory-skills)
+
+### Session Bootstrap (MANDATORY — run BEFORE any action)
+1. Use the `get_bootstrap` MCP tool to load recent neurons
+2. Read PROJECT_MEMORY.md if it exists
+3. Do NOT execute any action until bootstrap completes
+
+### During Work
+- Before implementing: use `search_neurons` to check if a similar error/pattern exists
+- When encountering an error: use `create_neuron` (category: errors) to capture it
+- When making an architecture decision: use `create_neuron` (category: decisions)
+- When spotting a recurring pattern: use `create_neuron` (category: patterns)
+
+### Session Close (MANDATORY — run BEFORE ending)
+1. Create neurons for new errors and decisions encountered
+2. Use `list_patterns` to review active patterns
+3. Use `update_pattern_counter` for any patterns that were relevant (hit) or not (miss)
+INSTREOF
+
+    echo ""
+
+    case "$agent" in
+        claude-code)
+            local claude_md="$project_root/CLAUDE.md"
+            if [[ -f "$claude_md" ]]; then
+                if grep -q "Neuron System" "$claude_md" 2>/dev/null; then
+                    echo "  ⚠ CLAUDE.md already has Neuron System instructions — skipping"
+                    return 0
+                fi
+                echo "" >> "$claude_md"
+                echo "$instructions" >> "$claude_md"
+            else
+                echo "$instructions" > "$claude_md"
+            fi
+            echo "  ✓ Bootstrap instructions added to CLAUDE.md"
+            ;;
+        cursor)
+            mkdir -p "$agent_config"
+            echo "$instructions" > "$agent_config/neuron-system.md"
+            echo "  ✓ Bootstrap instructions added to .cursor/rules/neuron-system.md"
+            ;;
+        gemini-cli)
+            mkdir -p "$agent_config"
+            echo "$instructions" > "$agent_config/neuron-system.md"
+            echo "  ✓ Bootstrap instructions added to .gemini/instructions/neuron-system.md"
+            ;;
+    esac
+}
+
+setup_mcp_config() {
+    local project_root="$1"
+    local mcp_file="$project_root/.mcp.json"
+    local mcp_server_dir
+    mcp_server_dir="$(cd "$(dirname "$0")/../mcp-server" 2>/dev/null && pwd || echo "")"
+
+    if [[ -z "$mcp_server_dir" ]] || [[ ! -f "$mcp_server_dir/package.json" ]]; then
+        echo "  ⚠ MCP server not found — skipping MCP config"
+        return 0
+    fi
+
+    # Determine node path
+    local node_path
+    node_path="$(command -v node 2>/dev/null || echo "/usr/local/bin/node")"
+
+    echo ""
+    echo "Configuring MCP server..."
+
+    if [[ -f "$mcp_file" ]]; then
+        # Check if factory-neurons already configured
+        if grep -q "factory-neurons" "$mcp_file" 2>/dev/null; then
+            echo "  ⚠ factory-neurons already in .mcp.json — skipping"
+            return 0
+        fi
+        echo "  ⚠ .mcp.json exists — add this manually:"
+        echo ""
+        echo "  \"factory-neurons\": {"
+        echo "    \"command\": \"$node_path\","
+        echo "    \"args\": [\"$mcp_server_dir/dist/server.js\", \"$project_root\"]"
+        echo "  }"
+        return 0
+    fi
+
+    cat > "$mcp_file" << MCPEOF
+{
+  "mcpServers": {
+    "factory-neurons": {
+      "command": "$node_path",
+      "args": ["$mcp_server_dir/dist/server.js", "$project_root"]
+    }
+  }
+}
+MCPEOF
+
+    echo "  ✓ .mcp.json created with factory-neurons server"
+}
+
+# ─── Command: bootstrap (for hooks) ─────────────────────────
+
+cmd_bootstrap() {
+    local neurons_dir
+    neurons_dir="$(find_neurons_dir 2>/dev/null)" || return 0
+
+    local ne_count nd_count np_count nf_count
+    ne_count=$(find "$neurons_dir/errors" -name "NE-*.md" 2>/dev/null | wc -l | tr -d ' ')
+    nd_count=$(find "$neurons_dir/decisions" -name "ND-*.md" 2>/dev/null | wc -l | tr -d ' ')
+    np_count=$(find "$neurons_dir/patterns" -name "NP-*.md" 2>/dev/null | wc -l | tr -d ' ')
+    nf_count=$(find "$neurons_dir/foundations" -name "NF-*.md" 2>/dev/null | wc -l | tr -d ' ')
+    local total=$((ne_count + nd_count + np_count + nf_count))
+
+    echo "# Neuron Bootstrap"
+    echo ""
+    echo "Knowledge base: $total neurons (NE:$ne_count ND:$nd_count NP:$np_count NF:$nf_count)"
+    echo ""
+
+    # Recent errors
+    if [[ $ne_count -gt 0 ]]; then
+        echo "## Recent Errors"
+        find "$neurons_dir/errors" -name "NE-*.md" -exec stat -f '%m %N' {} \; 2>/dev/null \
+            | sort -rn | head -5 | while read -r _ filepath; do
+            local title
+            title=$(grep -m1 "^# " "$filepath" 2>/dev/null | sed 's/^# //')
+            echo "- $(basename "$filepath" .md): $title"
+        done
+        echo ""
+    fi
+
+    # Recent patterns
+    if [[ $np_count -gt 0 ]]; then
+        echo "## Active Patterns"
+        find "$neurons_dir/patterns" -name "NP-*.md" -exec stat -f '%m %N' {} \; 2>/dev/null \
+            | sort -rn | while read -r _ filepath; do
+            local title hits misses status
+            title=$(grep -m1 "^# " "$filepath" 2>/dev/null | sed 's/^# //')
+            hits=$(awk '/^---$/{n++; next} n==1{print} n>=2{nextfile}' "$filepath" 2>/dev/null | grep "^hits:" | sed 's/^hits:[[:space:]]*//')
+            misses=$(awk '/^---$/{n++; next} n==1{print} n>=2{nextfile}' "$filepath" 2>/dev/null | grep "^misses:" | sed 's/^misses:[[:space:]]*//')
+            status=$(awk '/^---$/{n++; next} n==1{print} n>=2{nextfile}' "$filepath" 2>/dev/null | grep "^status:" | sed 's/^status:[[:space:]]*//')
+            echo "- $(basename "$filepath" .md): $title [hits:${hits:-0} misses:${misses:-0} status:${status:-new}]"
+        done
+        echo ""
+    fi
+
+    # Foundations
+    if [[ $nf_count -gt 0 ]]; then
+        echo "## Foundations"
+        find "$neurons_dir/foundations" -name "NF-*.md" 2>/dev/null | sort | while read -r filepath; do
+            local title
+            title=$(grep -m1 "^# " "$filepath" 2>/dev/null | sed 's/^# //')
+            echo "- $(basename "$filepath" .md): $title"
+        done
+        echo ""
+    fi
+}
+
 # ─── Dispatch ─────────────────────────────────────────────────
 
 case "${1:-help}" in
+    init)       shift; cmd_init "$@" ;;
     stats)      cmd_stats ;;
     contribute) cmd_contribute ;;
+    bootstrap)  cmd_bootstrap ;;
     help|--help|-h) cmd_help ;;
     *)
         echo "Unknown command: $1"

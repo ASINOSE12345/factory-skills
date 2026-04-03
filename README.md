@@ -56,51 +56,71 @@ Keep track of where you left off, across sessions, across days, across context c
 
 ---
 
-## Quick Start (5 minutes)
+## Quick Start (2 minutes)
 
-### Step 1: Clone the repo
+### Step 1: Clone and build
 
 ```bash
 git clone https://github.com/ASINOSE12345/factory-skills.git
+cd factory-skills/mcp-server && npm install && npm run build
 ```
 
-### Step 2: Choose your integration method
-
-#### Option A: Project-level (recommended for teams)
-
-Add the skills to a specific project. Every session in that project will use them.
+### Step 2: Initialize in your project
 
 ```bash
-# From your project root
-mkdir -p .claude/skills
+cd /path/to/your/project
+/path/to/factory-skills/bin/factory-skills init
+```
 
-# Copy the skills you want
+This single command:
+- Creates `neurons/{errors,decisions,patterns,foundations}`
+- Detects your AI agent (Claude Code, Cursor, Gemini CLI)
+- Installs auto-bootstrap hooks (Claude Code)
+- Configures the MCP server in `.mcp.json`
+- Adds bootstrap/close instructions to your agent config
+
+### Step 3: Start a new session
+
+That's it. Your agent will now:
+1. **Bootstrap** — automatically load recent neurons at session start
+2. **Search** — query prior knowledge before implementing anything
+3. **Capture** — create neurons for errors, decisions, and patterns
+4. **Learn** — patterns auto-validate through hit/miss counters
+
+### Manual setup (alternative)
+
+If you prefer manual control, or use an agent other than Claude Code:
+
+<details>
+<summary>Option A: Project-level skills (teams)</summary>
+
+```bash
+mkdir -p .claude/skills
 cp -r /path/to/factory-skills/neuron-system .claude/skills/
 cp -r /path/to/factory-skills/project-memory .claude/skills/
 ```
+</details>
 
-#### Option B: Global (recommended for solo developers)
-
-Add the skills to your global Claude config. Every session, in every project, will use them.
+<details>
+<summary>Option B: Global skills (solo developers)</summary>
 
 ```bash
-# Copy to global skills directory
 cp -r /path/to/factory-skills/neuron-system ~/.claude/skills/
 cp -r /path/to/factory-skills/project-memory ~/.claude/skills/
 ```
+</details>
 
-#### Option C: Other AI agents (Cursor, Codex, Gemini CLI)
-
-The skills are plain markdown. Copy the `SKILL.md` content into your agent's system prompt, instruction file, or rules file.
+<details>
+<summary>Option C: Other agents (Cursor, Codex, Gemini CLI)</summary>
 
 ```bash
-# For Cursor: copy into .cursor/rules/
+# For Cursor
 cp factory-skills/neuron-system/SKILL.md .cursor/rules/neuron-system.md
-cp factory-skills/project-memory/SKILL.md .cursor/rules/project-memory.md
 
-# For Codex: copy into codex instructions
-# For Gemini CLI: copy into .gemini/instructions/
+# For Gemini CLI
+cp factory-skills/neuron-system/SKILL.md .gemini/instructions/neuron-system.md
 ```
+</details>
 
 ### Step 3: Create the neurons directory
 
@@ -165,23 +185,54 @@ Each session builds on the last. Your neurons directory will grow with your proj
 
 ---
 
+## MCP Server — The Brain
+
+The MCP server (`factory-neurons`) exposes your neurons as tools that any AI agent can use automatically:
+
+| Tool | What it does |
+|------|-------------|
+| `search_neurons` | Search by keyword across all neurons. Returns scored results. |
+| `get_neuron` | Read the full content of a specific neuron by ID. |
+| `create_neuron` | Create a new neuron (error, decision, pattern, foundation). |
+| `update_pattern_counter` | Record a hit or miss for a pattern. Drives lifecycle gates. |
+| `get_bootstrap` | Get recent neurons formatted for session injection. |
+| `get_stats` | Aggregate stats: counts per type, domains, total. |
+| `list_patterns` | List all patterns with lifecycle status and counters. |
+
+The MCP server is configured automatically by `factory-skills init`. To add it manually:
+
+```json
+{
+  "mcpServers": {
+    "factory-neurons": {
+      "command": "node",
+      "args": ["/path/to/factory-skills/mcp-server/dist/server.js", "/path/to/your/project"]
+    }
+  }
+}
+```
+
+---
+
 ## How They Work Together
 
 ```
 Session Start
     │
     ▼
-[Bootstrap] ── Read PROJECT_MEMORY.md (where did I leave off?)
-    │           Read recent neurons (what do I already know?)
+[Bootstrap] ── Hook fires → get_bootstrap loads recent neurons
+    │           Agent reads PROJECT_MEMORY.md (where did I leave off?)
     │
     ▼
-[Work] ──────── Agent encounters error → creates NE-045
-    │           Agent makes architecture decision → creates ND-023
-    │           Agent notices recurring pattern → creates NP-007
+[Work] ──────── search_neurons("null constraint") → finds NE-001
+    │           Agent encounters error → create_neuron(errors, ...)
+    │           Agent makes architecture decision → create_neuron(decisions, ...)
+    │           Agent notices recurring pattern → create_neuron(patterns, ...)
     │
     ▼
-[Close] ─────── Update PROJECT_MEMORY.md (what happened today?)
-                Update pattern counters (did old patterns help?)
+[Close] ─────── list_patterns → review which patterns were relevant
+                update_pattern_counter(NP-003, hit) → auto-validates
+                Update PROJECT_MEMORY.md (what happened today?)
                 Next session starts informed, not blind
 ```
 
