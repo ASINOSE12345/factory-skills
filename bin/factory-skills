@@ -1,0 +1,400 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# factory-skills — Community feedback tools for the neuron system
+# https://github.com/ASINOSE12345/factory-skills
+
+UPSTREAM_REPO="ASINOSE12345/factory-skills"
+
+# ─── Utilities ───────────────────────────────────────────────
+
+find_neurons_dir() {
+    local candidates=(
+        "./neurons"
+        "../neurons"
+        "${FACTORY_ROOT:-}/neurons"
+    )
+    for dir in "${candidates[@]}"; do
+        if [[ -d "$dir" ]]; then
+            echo "$(cd "$dir" && pwd)"
+            return 0
+        fi
+    done
+    echo "ERROR: No neurons/ directory found." >&2
+    echo "Run from your project root, or set FACTORY_ROOT env var." >&2
+    return 1
+}
+
+check_gh() {
+    if ! command -v gh &>/dev/null; then
+        echo "ERROR: gh CLI is required but not installed." >&2
+        echo "Install it: https://cli.github.com" >&2
+        return 1
+    fi
+    if ! gh auth status &>/dev/null 2>&1; then
+        echo "ERROR: gh CLI is not authenticated." >&2
+        echo "Run: gh auth login" >&2
+        return 1
+    fi
+}
+
+extract_domains() {
+    local dir="$1"
+    # Read ONLY frontmatter (between --- markers), extract domain: values
+    find "$dir" -name "*.md" -exec awk '/^---$/{n++; next} n==1{print} n>=2{nextfile}' {} \; 2>/dev/null \
+        | grep -E "^domain:" \
+        | sed 's/^domain:[[:space:]]*//' \
+        | sort | uniq -c | sort -rn | head -5 \
+        | awk '{print $2}' | paste -sd ", " -
+}
+
+# ─── Command: help ───────────────────────────────────────────
+
+cmd_help() {
+    cat <<'EOF'
+factory-skills — Community feedback tools for the neuron system
+
+USAGE:
+    factory-skills <command>
+
+COMMANDS:
+    stats       Report anonymous aggregate stats from your neurons/ directory.
+                Collects ONLY: counts per type, session count, top domains.
+                Sends NO content, NO project names, NO file paths, NO code.
+
+    contribute  Share your pattern neurons (NP-*.md) with the community.
+                Each pattern is anonymized and shown to you for approval
+                BEFORE submission. You control exactly what gets shared.
+
+    help        Show this help message.
+
+REQUIREMENTS:
+    - gh CLI (https://cli.github.com) — authenticated with GitHub
+    - A neurons/ directory in the current project or $FACTORY_ROOT
+
+PRIVACY:
+    - stats:      ONLY aggregate numbers. Zero content transmitted.
+    - contribute:  YOU review every pattern before submission.
+                   Automated stripping + manual approval = zero leaks.
+    - Nothing is ever sent without your explicit [y] confirmation.
+
+EXAMPLES:
+    factory-skills stats
+    factory-skills contribute
+    FACTORY_ROOT=/path/to/workspace factory-skills stats
+EOF
+}
+
+# ─── Command: stats (Level 1) ────────────────────────────────
+
+cmd_stats() {
+    local neurons_dir
+    neurons_dir="$(find_neurons_dir)"
+    check_gh
+
+    echo "=== Factory Skills — Anonymous Stats ==="
+    echo "Scanning: $neurons_dir"
+    echo ""
+
+    # Count neurons per type
+    local ne_count nd_count np_count nf_count
+    ne_count=$(find "$neurons_dir/errors" -name "NE-*.md" 2>/dev/null | wc -l | tr -d ' ')
+    nd_count=$(find "$neurons_dir/decisions" -name "ND-*.md" 2>/dev/null | wc -l | tr -d ' ')
+    np_count=$(find "$neurons_dir/patterns" -name "NP-*.md" 2>/dev/null | wc -l | tr -d ' ')
+    nf_count=$(find "$neurons_dir/foundations" -name "NF-*.md" 2>/dev/null | wc -l | tr -d ' ')
+    local total=$((ne_count + nd_count + np_count + nf_count))
+
+    # Extract top domains from frontmatter
+    local domains
+    domains="$(extract_domains "$neurons_dir")"
+    [[ -z "$domains" ]] && domains="(none detected)"
+
+    # Count unique sessions by unique date: values in frontmatter
+    local session_count
+    session_count=$(find "$neurons_dir" -name "*.md" -exec awk '/^---$/{n++; next} n==1{print} n>=2{nextfile}' {} \; 2>/dev/null \
+        | grep -E "^(date|created):" \
+        | sed 's/^[^:]*:[[:space:]]*//' \
+        | sort -u | wc -l | tr -d ' ')
+
+    echo "┌─────────────────────────────────────┐"
+    echo "│  THIS IS ALL THAT WILL BE SENT:     │"
+    echo "├─────────────────────────────────────┤"
+    printf "│  Error neurons (NE):    %-11s│\n" "$ne_count"
+    printf "│  Decision neurons (ND): %-11s│\n" "$nd_count"
+    printf "│  Pattern neurons (NP):  %-11s│\n" "$np_count"
+    printf "│  Foundation neurons (NF):%-10s│\n" "$nf_count"
+    printf "│  Total:                 %-11s│\n" "$total"
+    printf "│  Unique sessions:       %-11s│\n" "$session_count"
+    printf "│  Top domains:           %-11s│\n" "$domains"
+    echo "├─────────────────────────────────────┤"
+    echo "│  No content. No names. No paths.    │"
+    echo "└─────────────────────────────────────┘"
+    echo ""
+
+    read -rp "Submit these anonymous stats to the community? [y/N] " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        echo "Cancelled. Nothing was sent."
+        return 0
+    fi
+
+    # Get repo node ID
+    local repo_id
+    repo_id=$(gh api graphql -f query='
+        query { repository(owner: "ASINOSE12345", name: "factory-skills") { id } }
+    ' --jq '.data.repository.id' 2>/dev/null)
+
+    if [[ -z "$repo_id" ]]; then
+        echo "ERROR: Could not fetch repo ID. Are GitHub Discussions enabled?" >&2
+        echo "Falling back to local output only." >&2
+        return 1
+    fi
+
+    # Get Stats category ID
+    local category_id
+    # Try "Stats" category first, fall back to "General"
+    category_id=$(gh api graphql -f query='
+        query {
+            repository(owner: "ASINOSE12345", name: "factory-skills") {
+                discussionCategories(first: 20) {
+                    nodes { id name }
+                }
+            }
+        }
+    ' --jq '.data.repository.discussionCategories.nodes[] | select(.name=="Stats" or .name=="General") | .id' 2>/dev/null | head -1)
+
+    if [[ -z "$category_id" ]]; then
+        echo "ERROR: No discussion category found." >&2
+        echo "The repo needs Discussions enabled with at least a 'General' category." >&2
+        return 1
+    fi
+
+    local submit_date
+    submit_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    local body="## Anonymous Stats Report
+
+| Metric | Value |
+|--------|-------|
+| Error neurons (NE) | ${ne_count} |
+| Decision neurons (ND) | ${nd_count} |
+| Pattern neurons (NP) | ${np_count} |
+| Foundation neurons (NF) | ${nf_count} |
+| **Total** | **${total}** |
+| Unique sessions | ${session_count} |
+| Top domains | ${domains} |
+
+*Submitted: ${submit_date}*"
+
+    gh api graphql \
+        -f query='mutation($repoId: ID!, $catId: ID!, $body: String!, $title: String!) {
+            createDiscussion(input: {repositoryId: $repoId, categoryId: $catId, body: $body, title: $title}) {
+                discussion { url }
+            }
+        }' \
+        -f repoId="$repo_id" \
+        -f catId="$category_id" \
+        -f title="Stats Report — $(date +%Y-%m-%d)" \
+        -f body="$body" \
+        --jq '.data.createDiscussion.discussion.url'
+
+    echo ""
+    echo "Stats submitted. Thank you for contributing!"
+}
+
+# ─── Command: contribute (Level 2) ───────────────────────────
+
+anonymize_pattern() {
+    local file="$1"
+    local content
+    content="$(cat "$file")"
+
+    # 1. Strip project-specific frontmatter fields
+    content="$(echo "$content" | sed -E 's/^project:.*$/project: [redacted]/')"
+    content="$(echo "$content" | sed -E 's/^derived_from:.*$/derived_from: [ref]/')"
+    content="$(echo "$content" | sed -E 's/^issue:.*$/issue: [ref]/')"
+
+    # 2. Strip issue references: #123, [[#123]], Refs #42
+    content="$(echo "$content" | sed -E 's/\[\[#?[A-Za-z]*-?[0-9]+\]\]/[[ref]]/g')"
+    content="$(echo "$content" | sed -E 's/(Refs|Fixes|Closes|Resolves) #[0-9]+/\1 [ref]/g')"
+    content="$(echo "$content" | sed -E 's/#[0-9]{2,}/[ref]/g')"
+
+    # 3. Strip file paths (src/foo/bar.ts, `path/to/file.ext`)
+    content="$(echo "$content" | sed -E 's|`[a-zA-Z0-9_./-]+\.[a-z]{2,4}`|`[file]`|g')"
+    content="$(echo "$content" | sed -E 's|[a-zA-Z0-9_-]+/[a-zA-Z0-9_./-]+\.[a-z]{2,4}|[file]|g')"
+
+    # 4. Strip neuron cross-references
+    content="$(echo "$content" | sed -E 's/\[\[NE-[0-9]+\]\]/[[NE-ref]]/g')"
+    content="$(echo "$content" | sed -E 's/\[\[ND-[0-9]+\]\]/[[ND-ref]]/g')"
+    content="$(echo "$content" | sed -E 's/NE-[0-9]+/NE-ref/g')"
+    content="$(echo "$content" | sed -E 's/ND-[0-9]+/ND-ref/g')"
+
+    # 5. Strip Supabase project refs and long hex/alphanumeric tokens
+    content="$(echo "$content" | sed -E 's/--project-ref [a-zA-Z0-9]+/--project-ref [ref]/g')"
+    content="$(echo "$content" | sed -E 's/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[uuid]/g')"
+
+    # 6. Strip date cross-references
+    content="$(echo "$content" | sed -E 's/\[\[20[0-9]{2}-[0-9]{2}-[0-9]{2}\]\]/[[date]]/g')"
+    content="$(echo "$content" | sed -E 's/20[0-9]{2}-[0-9]{2}-[0-9]{2}/[date]/g')"
+
+    # 7. Generate community header
+    local community_id="CP-$(date +%Y%m%d)-$(openssl rand -hex 3)"
+
+    # 8. Extract body (everything after second ---)
+    local body
+    body="$(echo "$content" | awk 'BEGIN{n=0} /^---$/{n++; if(n==2){found=1; next}} found{print}')"
+
+    cat <<HEADER
+---
+id: ${community_id}
+type: community-pattern
+source: anonymous
+submitted: $(date -u +%Y-%m-%d)
+---
+HEADER
+    echo ""
+    echo "$body"
+}
+
+cmd_contribute() {
+    local neurons_dir
+    neurons_dir="$(find_neurons_dir)"
+    check_gh
+
+    local patterns_dir="$neurons_dir/patterns"
+
+    if [[ ! -d "$patterns_dir" ]]; then
+        echo "No patterns directory found at $patterns_dir"
+        return 1
+    fi
+
+    local pattern_files=()
+    while IFS= read -r -d '' f; do
+        pattern_files+=("$f")
+    done < <(find "$patterns_dir" -name "NP-*.md" -type f -print0 | sort -z)
+
+    if [[ ${#pattern_files[@]} -eq 0 ]]; then
+        echo "No pattern neurons (NP-*.md) found in $patterns_dir"
+        return 0
+    fi
+
+    echo "=== Factory Skills — Contribute Patterns ==="
+    echo "Found ${#pattern_files[@]} pattern(s). You will review each one."
+    echo "Nothing is shared without your explicit approval."
+    echo ""
+
+    local approved_files=()
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+
+    for file in "${pattern_files[@]}"; do
+        local basename
+        basename="$(basename "$file")"
+        echo "━━━ Pattern: $basename ━━━"
+
+        local anonymized
+        anonymized="$(anonymize_pattern "$file")"
+
+        echo ""
+        echo "$anonymized"
+        echo ""
+        echo "━━━ End of anonymized version ━━━"
+        read -rp "Approve? [y/N/e(dit in \$EDITOR)] " choice
+
+        case "$choice" in
+            y|Y)
+                echo "$anonymized" > "$tmpdir/$basename"
+                approved_files+=("$tmpdir/$basename")
+                echo "✓ Approved."
+                ;;
+            e|E)
+                echo "$anonymized" > "$tmpdir/$basename"
+                ${EDITOR:-vi} "$tmpdir/$basename"
+                read -rp "Approve edited version? [y/N] " confirm2
+                if [[ "$confirm2" == "y" || "$confirm2" == "Y" ]]; then
+                    approved_files+=("$tmpdir/$basename")
+                    echo "✓ Approved (edited)."
+                else
+                    echo "✗ Skipped."
+                fi
+                ;;
+            *)
+                echo "✗ Skipped."
+                ;;
+        esac
+        echo ""
+    done
+
+    if [[ ${#approved_files[@]} -eq 0 ]]; then
+        echo "No patterns approved. Nothing was submitted."
+        rm -rf "$tmpdir"
+        return 0
+    fi
+
+    echo "${#approved_files[@]} pattern(s) approved. Creating PR..."
+
+    # Fork if needed (idempotent)
+    gh repo fork "$UPSTREAM_REPO" --clone=false 2>/dev/null || true
+
+    local fork_owner
+    fork_owner="$(gh api user --jq '.login')"
+    local branch="community/patterns-$(date +%Y%m%d)-$(openssl rand -hex 3)"
+
+    # Clone fork to temp, add patterns, push, create PR
+    local clone_dir
+    clone_dir="$(mktemp -d)"
+    gh repo clone "$fork_owner/factory-skills" "$clone_dir" -- --depth 1 2>/dev/null
+
+    cd "$clone_dir"
+    git checkout -b "$branch"
+    mkdir -p community/patterns
+
+    for file in "${approved_files[@]}"; do
+        cp "$file" "community/patterns/"
+    done
+
+    git add community/patterns/
+    git commit -m "community: contribute ${#approved_files[@]} anonymized pattern(s)"
+    git push origin "$branch" 2>/dev/null
+
+    local pr_url
+    pr_url=$(gh pr create \
+        --repo "$UPSTREAM_REPO" \
+        --head "$fork_owner:$branch" \
+        --title "Community: ${#approved_files[@]} pattern contribution(s)" \
+        --body "## Community Pattern Contribution
+
+${#approved_files[@]} anonymized pattern(s) from a factory-skills user.
+
+**Privacy verification:**
+- [x] Automated regex stripping applied
+- [x] Each pattern reviewed and approved by contributor
+- [ ] Maintainer review (pending)
+
+**What was stripped:**
+- Project names → \`[redacted]\`
+- Issue references → \`[ref]\`
+- File paths → \`[file]\`
+- Neuron cross-references → \`[NE-ref]\`, \`[ND-ref]\`
+- Dates → \`[date]\`")
+
+    echo ""
+    echo "PR created: $pr_url"
+    echo "Thank you for contributing to the community!"
+
+    # Cleanup
+    cd - >/dev/null
+    rm -rf "$tmpdir" "$clone_dir"
+}
+
+# ─── Dispatch ─────────────────────────────────────────────────
+
+case "${1:-help}" in
+    stats)      cmd_stats ;;
+    contribute) cmd_contribute ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        echo "Unknown command: $1"
+        echo "Run 'factory-skills help' for usage."
+        exit 1
+        ;;
+esac

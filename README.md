@@ -251,6 +251,50 @@ A: Yes. Use a shared `neurons/` directory at your workspace root for cross-proje
 
 ---
 
+## Community — Help the System Get Smarter
+
+Factory Skills has an optional community feedback loop. Your neurons stay private — but you can choose to share anonymized insights that help everyone.
+
+### Level 1: Anonymous Stats (passive)
+
+Share aggregate counts — zero content, zero project info.
+
+```bash
+# Install the CLI (one-time)
+chmod +x bin/factory-skills
+
+# Run from your project root (where neurons/ lives)
+factory-skills stats
+```
+
+What gets shared: neuron counts per type, session count, top domains. That's it.
+
+### Level 2: Community Patterns (opt-in)
+
+Share your pattern neurons (NP-*.md), anonymized and reviewed by you before submission.
+
+```bash
+factory-skills contribute
+```
+
+Each pattern goes through:
+1. **Automated stripping** — project names, file paths, issue refs, dates all removed
+2. **Your review** — you see the exact anonymized version and approve/skip/edit each one
+3. **PR submission** — creates a Pull Request you can track on GitHub
+
+### Level 3: Curated Foundations (manual)
+
+Universal principles that transcend any single project. Contributed via Pull Request to `community/foundations/`.
+
+See [community/README.md](./community/README.md) for full details, privacy policy, and contribution guidelines.
+
+### Prerequisites
+
+- [gh CLI](https://cli.github.com) — installed and authenticated (`gh auth login`)
+- A `neurons/` directory in your project
+
+---
+
 ## Contributing
 
 Found a bug? Want to add a neuron type? PRs welcome.
