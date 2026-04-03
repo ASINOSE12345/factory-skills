@@ -527,6 +527,7 @@ install_claude_hooks() {
         echo "  Add these hooks manually if needed:"
         echo ""
         echo "  SessionStart: node $mcp_server_dir/dist/bootstrap-hook.js"
+        echo "  PostToolUse (Bash): node $mcp_server_dir/dist/auto-capture.js"
         return 0
     fi
 
@@ -543,12 +544,25 @@ install_claude_hooks() {
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$node_path $mcp_server_dir/dist/auto-capture.js"
+          }
+        ]
+      }
     ]
   }
 }
 HOOKEOF
 
-    echo "  ✓ hooks.json created with SessionStart bootstrap"
+    echo "  ✓ hooks.json created with:"
+    echo "    - SessionStart → auto-bootstrap (loads recent neurons)"
+    echo "    - PostToolUse → auto-capture (detects errors from Bash output)"
 }
 
 inject_bootstrap_instructions() {
