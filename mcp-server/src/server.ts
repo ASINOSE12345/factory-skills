@@ -3,7 +3,7 @@
 /**
  * factory-neurons — MCP Server for persistent AI agent memory
  *
- * Exposes the neuron system (errors, decisions, patterns, foundations)
+ * Exposes the neuron system (errors, decisions, patterns, foundations, business)
  * as MCP tools that any AI agent can query and update.
  */
 
@@ -14,6 +14,7 @@ import {
   resolveNeuronsDir,
   ensureNeuronsDir,
   searchNeurons,
+  searchNeuronsScored,
   createNeuron,
   updatePatternCounter,
   getStats,
@@ -23,6 +24,8 @@ import {
   toBreadcrumb,
   type NeuronCategory,
 } from "./neurons.js";
+import { getNeuronVectors } from "./embeddings.js";
+import { analyzeGaps } from "./gap-analysis.js";
 
 const VERSION = "0.1.0";
 
@@ -33,7 +36,7 @@ const resolvedDir = resolveNeuronsDir(projectRoot);
 if (!resolvedDir) {
   console.error(
     `ERROR: No neurons/ directory found from ${projectRoot}.\n` +
-    `Create it with: mkdir -p neurons/{errors,decisions,patterns,foundations}\n` +
+    `Create it with: mkdir -p neurons/{errors,decisions,patterns,foundations,business}\n` +
     `Or pass the project root as argument: factory-neurons /path/to/project`
   );
   process.exit(1);
@@ -67,7 +70,7 @@ function neuronError(code: string, message: string, hint?: string) {
 
 // ─── Tools ───────────────────────────────────────────────────
 
-const CATEGORIES = ["errors", "decisions", "patterns", "foundations"] as const;
+const CATEGORIES = ["errors", "decisions", "patterns", "foundations", "business"] as const;
 
 /**
  * TOOL: search_neurons
@@ -79,12 +82,13 @@ server.tool(
   "Use this BEFORE implementing anything — check if a similar error, decision, or pattern already exists.",
   {
     query: z.string().describe("Search query (keywords, error message, domain, etc.)"),
-    category: z.enum(CATEGORIES).optional().describe("Filter by category: errors, decisions, patterns, foundations"),
+    category: z.enum(CATEGORIES).optional().describe("Filter by category: errors, decisions, patterns, foundations, business"),
+    project: z.string().optional().describe("Filter by project scope (e.g. 'UrbanVistaCapital', 'PeopleSynapse'). Only returns neurons relevant to this project + cross-project neurons."),
     limit: z.number().optional().default(10).describe("Max results to return (default: 10)"),
   },
-  async ({ query, category, limit }) => {
+  async ({ query, category, limit, project }) => {
     try {
-      const results = searchNeurons(neuronsDir, query, category as NeuronCategory | undefined);
+      const results = await searchNeurons(neuronsDir, query, category as NeuronCategory | undefined, project);
       const limited = results.slice(0, limit ?? 10);
 
       return wrapResult({
@@ -109,6 +113,65 @@ server.tool(
 );
 
 /**
+ * TOOL: think_neurons
+ * Like search_neurons, but adds a deterministic gap-analysis layer: returns the
+ * matching neurons AND an honest report of what the brain does NOT know yet
+ * (superseded, stale, near-duplicate, unreliable, low-coverage). Inspired by
+ * GBrain's `think` vs `search` split. Zero LLM calls.
+ */
+server.tool(
+  "think_neurons",
+  "Like search_neurons but with gap-analysis: returns the matching neurons AND an honest report of " +
+  "what the brain does NOT know yet — superseded/dead neurons, stale (outdated) ones, near-duplicates " +
+  "worth consolidating, unreliable patterns, and coverage confidence. Use when you need to TRUST the " +
+  "answer, not just find pages. Deterministic, no LLM cost.",
+  {
+    query: z.string().describe("Search query (keywords, error message, domain, etc.)"),
+    category: z.enum(CATEGORIES).optional().describe("Filter by category: errors, decisions, patterns, foundations, business"),
+    project: z.string().optional().describe("Filter by project scope (e.g. 'UrbanVistaCapital', 'PeopleSynapse')"),
+    limit: z.number().optional().default(8).describe("Max results to scrutinize/return (default: 8)"),
+  },
+  async ({ query, category, limit, project }) => {
+    try {
+      const k = limit ?? 8;
+      const scored = await searchNeuronsScored(neuronsDir, query, category as NeuronCategory | undefined, project);
+      const top = scored.slice(0, k);
+      const usedSemantic = scored.some((s) => s.usedSemantic);
+
+      // Cached vectors for the top results (cross-neuron duplicate detection, no API key needed)
+      const vectors = getNeuronVectors(neuronsDir, top.map((s) => s.neuron.filename));
+
+      const gaps = analyzeGaps({
+        scored: top.map((s) => ({ neuron: s.neuron, score: s.score, semanticScore: s.semanticScore })),
+        topK: k,
+        vectors,
+        hadProjectFilter: project != null,
+        usedSemantic,
+      });
+
+      return wrapResult({
+        query,
+        total_matches: scored.length,
+        showing: top.length,
+        results: top.map((s) => ({
+          id: s.neuron.filename.replace(".md", ""),
+          category: s.neuron.category,
+          title: s.neuron.title,
+          status: s.neuron.frontmatter.status ?? "new",
+          score: Number(s.score.toFixed(2)),
+          semantic_similarity: s.usedSemantic ? Number(s.semanticScore.toFixed(3)) : null,
+          created: s.neuron.frontmatter.created ?? s.neuron.frontmatter.date ?? null,
+          content_preview: s.neuron.content.slice(0, 200).trim(),
+        })),
+        gaps,
+      });
+    } catch (e) {
+      return neuronError("THINK_FAILED", String(e));
+    }
+  }
+);
+
+/**
  * TOOL: get_neuron
  * Read the full content of a specific neuron by ID.
  */
@@ -126,11 +189,12 @@ server.tool(
         ND: "decisions",
         NP: "patterns",
         NF: "foundations",
+        NB: "business",
       };
       const prefix = id.split("-")[0];
       const category = prefixMap[prefix];
       if (!category) {
-        return neuronError("INVALID_ID", `Unknown neuron prefix: ${prefix}`, "Use NE, ND, NP, or NF prefix");
+        return neuronError("INVALID_ID", `Unknown neuron prefix: ${prefix}`, "Use NE, ND, NP, NF, or NB prefix");
       }
 
       const all = listNeurons(neuronsDir, category);
@@ -163,7 +227,7 @@ server.tool(
   "Create a new neuron to capture learned knowledge. " +
   "Use after encountering an error, making a decision, spotting a pattern, or defining a principle.",
   {
-    category: z.enum(CATEGORIES).describe("Neuron type: errors (NE), decisions (ND), patterns (NP), foundations (NF)"),
+    category: z.enum(CATEGORIES).describe("Neuron type: errors (NE), decisions (ND), patterns (NP), foundations (NF), business (NB)"),
     title: z.string().describe("Short descriptive title (e.g. 'Null value violates not-null constraint')"),
     body: z.string().describe(
       "Markdown body with sections. For errors: What happened, Root cause, Fix applied, Rule learned. " +
