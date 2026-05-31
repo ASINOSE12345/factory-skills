@@ -27,7 +27,7 @@ import {
   resolveNeuronsDir,
   ensureNeuronsDir,
   createNeuron,
-  searchNeurons,
+  searchNeuronsSync,
   listNeurons,
   updatePatternCounter,
 } from "./neurons.js";
@@ -539,7 +539,7 @@ _Pending — to be filled after fix is verified_
     outputMessage = `[auto-capture] New error neuron ${neuronId}: ${errorSig.title}`;
 
     // Search for similar existing neurons to suggest connections
-    const similar = searchNeurons(neuronsDir, errorSig.title, "errors");
+    const similar = searchNeuronsSync(neuronsDir, errorSig.title, "errors");
     if (similar.length > 1) {
       const related = similar
         .filter((n) => n.filename !== neuron.filename)

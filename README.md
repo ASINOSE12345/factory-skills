@@ -42,7 +42,7 @@ cd /path/to/your/project
 That's it. The `init` command auto-detects your agent and configures everything:
 
 - Creates the `neurons/` directory structure
-- Installs the MCP server (7 tools your agent can call)
+- Installs the MCP server (8 tools your agent can call)
 - Sets up auto-bootstrap hooks (loads knowledge at session start)
 - Sets up auto-capture hooks (detects errors automatically)
 
@@ -82,7 +82,7 @@ Each neuron has YAML frontmatter (type, domain, severity, occurrences) and a mar
 |------|------|-------------|
 | **Auto-bootstrap** | Session starts | Loads the 5 most recent neurons per type as context |
 | **Auto-capture** | Bash command fails | Classifies the error and creates a neuron automatically |
-| **MCP server** | Agent needs knowledge | 7 tools: search, create, update counters, get stats |
+| **MCP server** | Agent needs knowledge | 8 tools: search, think, create, update counters, get stats |
 
 ### Auto-capture in action
 
@@ -107,13 +107,14 @@ The system self-cleans. Patterns that aren't useful fade away. Patterns that pro
 
 ---
 
-## MCP Server — 7 tools
+## MCP Server — 8 tools
 
 The MCP server exposes your neurons as tools any AI agent can call:
 
 | Tool | What it does |
 |------|-------------|
 | `search_neurons` | Keyword search across all neurons with relevance scoring |
+| `think_neurons` | Like `search_neurons`, plus a deterministic, read-only gap report: stale, superseded, near-duplicate, unreliable patterns, project-mix |
 | `get_neuron` | Read the full content of a specific neuron |
 | `create_neuron` | Create a new neuron (error, decision, pattern, foundation) |
 | `update_pattern_counter` | Record a hit or miss — drives lifecycle gates |
