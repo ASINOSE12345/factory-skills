@@ -42,7 +42,7 @@ cd /path/to/your/project
 That's it. The `init` command auto-detects your agent and configures everything:
 
 - Creates the `neurons/` directory structure
-- Installs the MCP server (8 tools your agent can call)
+- Installs the MCP server (9 tools your agent can call)
 - Sets up auto-bootstrap hooks (loads knowledge at session start)
 - Sets up auto-capture hooks (detects errors automatically)
 
@@ -82,7 +82,7 @@ Each neuron has YAML frontmatter (type, domain, severity, occurrences) and a mar
 |------|------|-------------|
 | **Auto-bootstrap** | Session starts | Loads the 5 most recent neurons per type as context |
 | **Auto-capture** | Bash command fails | Classifies the error and creates a neuron automatically |
-| **MCP server** | Agent needs knowledge | 8 tools: search, think, create, update counters, get stats |
+| **MCP server** | Agent needs knowledge | 9 tools: search, think, scan, create, update counters, get stats |
 
 ### Auto-capture in action
 
@@ -107,7 +107,7 @@ The system self-cleans. Patterns that aren't useful fade away. Patterns that pro
 
 ---
 
-## MCP Server — 8 tools
+## MCP Server — 9 tools
 
 The MCP server exposes your neurons as tools any AI agent can call:
 
@@ -115,6 +115,7 @@ The MCP server exposes your neurons as tools any AI agent can call:
 |------|-------------|
 | `search_neurons` | Keyword search across all neurons with relevance scoring |
 | `think_neurons` | Like `search_neurons`, plus a deterministic, read-only gap report: stale, superseded, near-duplicate, unreliable patterns, project-mix |
+| `dream_scan` | Read-only, corpus-wide health scan (not query-driven): near-duplicates, superseded, stale, unreliable patterns, unknown-scope. Proposals only — no writes, no LLM |
 | `get_neuron` | Read the full content of a specific neuron |
 | `create_neuron` | Create a new neuron (error, decision, pattern, foundation) |
 | `update_pattern_counter` | Record a hit or miss — drives lifecycle gates |
@@ -134,6 +135,16 @@ The MCP server is configured automatically by `init`. To add it manually:
   }
 }
 ```
+
+### Read-only CLI: `dream-scan`
+
+A deterministic, corpus-wide health scan you can run from the terminal:
+
+```bash
+dream-scan <projectRoot|neuronsDir> --threshold 0.93 --max-pairs 100 --format json
+```
+
+Surfaces near-duplicates, superseded, stale, unreliable patterns, and unknown-scope neurons. Accepts a project root or a `neurons/` dir. **Read-only — proposals only, no LLM, writes nothing.**
 
 ---
 

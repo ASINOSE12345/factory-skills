@@ -175,6 +175,21 @@ export function detectProjectMix(
   };
 }
 
+/**
+ * List neurons with no concrete project AND no global/cross-project scope —
+ * i.e. `projectScopeOf` returns "unknown". Candidates for scoping. Lists them
+ * (vs detectProjectMix which only counts) so the dream-scan report can name them.
+ */
+export function detectUnknownScope(neurons: Neuron[]): Array<{ id: string; category: Neuron["category"] }> {
+  const out: Array<{ id: string; category: Neuron["category"] }> = [];
+  for (const neuron of neurons) {
+    if (projectScopeOf(neuron) === "unknown") {
+      out.push({ id: idOf(neuron), category: neuron.category });
+    }
+  }
+  return out;
+}
+
 export interface AnalyzeGapsOptions {
   /** Ranked results to scrutinize (already category/project filtered). */
   scored: ScoredNeuronInput[];

@@ -26,6 +26,7 @@ import {
 } from "./neurons.js";
 import { getNeuronVectors } from "./embeddings.js";
 import { analyzeGaps } from "./gap-analysis.js";
+import { dreamScan, formatMarkdown } from "./dream-scan.js";
 
 const VERSION = "0.1.0";
 
@@ -167,6 +168,40 @@ server.tool(
       });
     } catch (e) {
       return neuronError("THINK_FAILED", String(e));
+    }
+  }
+);
+
+/**
+ * TOOL: dream_scan
+ * Read-only, deterministic, corpus-wide health scan of the WHOLE brain.
+ * Reuses the gap-analysis detectors over the entire corpus (not query-driven).
+ * Writes nothing — proposals only. The consolidation "cycle" (writes/issues, with
+ * an opt-in LLM judge) is a separate, later phase.
+ */
+server.tool(
+  "dream_scan",
+  "Read-only corpus-wide scan of the WHOLE neuron brain (not query-driven): near-duplicates, " +
+  "superseded, stale, unreliable patterns, and unknown-scope neurons. Writes nothing — proposals " +
+  "only, no LLM. Use to audit knowledge-base health and surface consolidation candidates.",
+  {
+    threshold: z.number().min(0.8).max(1).optional().default(0.93).describe("Cosine threshold for near-duplicates, 0.8–1 (default 0.93; 0.85 is noise on this corpus)"),
+    stale_days: z.number().int().min(1).optional().default(60).describe("A perishable neuron untouched longer than this is stale (default 60)"),
+    max_pairs: z.number().int().min(1).max(1000).optional().default(100).describe("Max near-duplicate pairs returned, top by similarity (default 100); total_possible_duplicates reports the full count"),
+    format: z.enum(["json", "markdown"]).optional().default("json").describe("Output format"),
+  },
+  async ({ threshold, stale_days, max_pairs, format }) => {
+    try {
+      const report = dreamScan(neuronsDir, {
+        threshold: threshold ?? 0.93,
+        staleDays: stale_days ?? 60,
+        maxPairs: max_pairs ?? 100,
+      });
+      return format === "markdown"
+        ? wrapResult({ markdown: formatMarkdown(report) })
+        : wrapResult(report);
+    } catch (e) {
+      return neuronError("DREAM_SCAN_FAILED", String(e));
     }
   }
 );
