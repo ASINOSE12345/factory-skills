@@ -3,12 +3,16 @@
   "version": "0.1.0",
   "description": "MCP server for the neuron system — persistent AI agent memory",
   "type": "module",
-  "bin": "./dist/server.js",
+  "bin": {
+    "factory-neurons-mcp": "./dist/server.js",
+    "dream-scan": "./dist/dream-scan.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/server.ts",
     "start": "node dist/server.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dream-scan": "node dist/dream-scan.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
