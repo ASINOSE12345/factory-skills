@@ -187,15 +187,17 @@ server.tool(
   {
     threshold: z.number().min(0.8).max(1).optional().default(0.93).describe("Cosine threshold for near-duplicates, 0.8–1 (default 0.93; 0.85 is noise on this corpus)"),
     stale_days: z.number().int().min(1).optional().default(60).describe("A perishable neuron untouched longer than this is stale (default 60)"),
-    max_pairs: z.number().int().min(1).max(1000).optional().default(100).describe("Max near-duplicate pairs returned, top by similarity (default 100); total_possible_duplicates reports the full count"),
+    max_pairs: z.number().int().min(1).max(1000).optional().default(25).describe("Max near-duplicate pairs returned, top by similarity (default 25); total_possible_duplicates reports the full count"),
+    max_items: z.number().int().min(1).max(1000).optional().default(25).describe("Max items per list (stale, unknown-scope, superseded, unreliable), top by relevance (default 25); total_* reports the full count"),
     format: z.enum(["json", "markdown"]).optional().default("json").describe("Output format"),
   },
-  async ({ threshold, stale_days, max_pairs, format }) => {
+  async ({ threshold, stale_days, max_pairs, max_items, format }) => {
     try {
       const report = dreamScan(neuronsDir, {
         threshold: threshold ?? 0.93,
         staleDays: stale_days ?? 60,
-        maxPairs: max_pairs ?? 100,
+        maxPairs: max_pairs ?? 25,
+        maxItems: max_items ?? 25,
       });
       return format === "markdown"
         ? wrapResult({ markdown: formatMarkdown(report) })

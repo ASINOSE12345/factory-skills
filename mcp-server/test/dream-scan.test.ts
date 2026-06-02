@@ -74,6 +74,16 @@ describe("dreamScan (core, real fixtures)", () => {
     const r = dreamScan(neuronsDir, { now: NOW });
     expect(r.total_possible_duplicates).toBe(r.possible_duplicates.length); // only 1 dup here, not capped
   });
+  it("caps lists with max_items, sorts deterministically, and reports honest totals", () => {
+    const r = dreamScan(neuronsDir, { now: NOW, maxItems: 1 });
+    expect(r.max_items).toBe(1);
+    expect(r.total_stale).toBe(2); // NE-900 + NE-901 (both old errors)
+    expect(r.stale.length).toBe(1); // capped
+    expect(r.stale[0].id).toBe("NE-900"); // days_old desc → oldest first
+    expect(r.total_unknown_scope).toBe(1);
+    expect(r.total_superseded).toBe(1);
+    expect(r.total_unreliable_patterns).toBe(1);
+  });
   it("detects superseded / unreliable / stale / unknown-scope", () => {
     const r = dreamScan(neuronsDir, { now: NOW, staleDays: 60 });
     expect(r.superseded.map((s) => s.id)).toContain("NP-900");
@@ -95,18 +105,22 @@ describe("dreamScan (core, real fixtures)", () => {
 
 describe("validateScanParams", () => {
   it("accepts in-range params", () => {
-    expect(validateScanParams(0.93, 60, 100)).toBeNull();
+    expect(validateScanParams(0.93, 60, 100, 50)).toBeNull();
   });
   it("rejects threshold below 0.8 or above 1", () => {
-    expect(validateScanParams(0.5, 60, 100)).toBeTruthy();
-    expect(validateScanParams(1.5, 60, 100)).toBeTruthy();
+    expect(validateScanParams(0.5, 60, 100, 50)).toBeTruthy();
+    expect(validateScanParams(1.5, 60, 100, 50)).toBeTruthy();
   });
   it("rejects non-positive stale-days and max-pairs", () => {
-    expect(validateScanParams(0.93, 0, 100)).toBeTruthy();
-    expect(validateScanParams(0.93, 60, 0)).toBeTruthy();
+    expect(validateScanParams(0.93, 0, 100, 50)).toBeTruthy();
+    expect(validateScanParams(0.93, 60, 0, 50)).toBeTruthy();
   });
   it("rejects max-pairs over the 1000 cap", () => {
-    expect(validateScanParams(0.93, 60, 999999)).toBeTruthy();
+    expect(validateScanParams(0.93, 60, 999999, 50)).toBeTruthy();
+  });
+  it("rejects max-items out of [1, 1000]", () => {
+    expect(validateScanParams(0.93, 60, 100, 0)).toBeTruthy();
+    expect(validateScanParams(0.93, 60, 100, 999999)).toBeTruthy();
   });
 });
 
@@ -210,5 +224,6 @@ describe("dream-scan CLI (subprocess on dist — P1 pipe + resolution)", () => {
     expect(fails("--threshold abc")).toBe(1);
     expect(fails("--format yaml")).toBe(1);
     expect(fails("--max-pairs 999999")).toBe(1);
+    expect(fails("--max-items 999999")).toBe(1);
   });
 });
