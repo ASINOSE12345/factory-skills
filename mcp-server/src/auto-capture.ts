@@ -33,6 +33,7 @@ import {
 } from "./neurons.js";
 import matter from "gray-matter";
 import { classifyVerification, isPushCommand } from "./verification-matcher.js";
+import { redactSecrets } from "./redact.js";
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -474,7 +475,7 @@ function updateIronGatesState(
   if (verdict.isVerification && verdict.safe && exitCode === 0 && !isPushCommand(command)) {
     state.verification_passed = true;
     state.last_verification_at = new Date().toISOString();
-    state.last_verification_cmd = command.slice(0, 200);
+    state.last_verification_cmd = redactSecrets(command).slice(0, 200);
     state.active_error = null;
     state.fix_attempts = {};
     saveIronGatesState(state);
@@ -518,7 +519,10 @@ async function main() {
     process.exit(0);
   }
 
-  const command = input.tool_input?.command ?? "";
+  // Redact secrets at the source: everything persisted downstream (error neuron
+  // body/title/rootCause and iron-gates last_verification_cmd) derives from
+  // command/stderr/stdout, so scrubbing here covers every field.
+  const command = redactSecrets(input.tool_input?.command ?? "");
   const isFailure = input.hook_event_name === "PostToolUseFailure";
 
   // Build stderr from the right source depending on hook type
@@ -537,6 +541,8 @@ async function main() {
     exitCode = (response as Record<string, unknown>).exit_code as number
       ?? (stderr.trim().length > 0 ? 1 : 0);
   }
+
+  stderr = redactSecrets(stderr);
 
   // Bridge to iron-gates Gate 2: record verification BEFORE shouldIgnore (a passing
   // test/build is often an "ignored" command, yet must still mark the session verified).
@@ -561,7 +567,7 @@ async function main() {
 
   // Classify the error
   // For PostToolUse success events, also check stdout for error patterns
-  const stdout = input.tool_response?.stdout ?? input.tool_output?.stdout ?? "";
+  const stdout = redactSecrets(input.tool_response?.stdout ?? input.tool_output?.stdout ?? "");
   const errorSig = classifyError(command, stderr || stdout, exitCode);
   if (!errorSig) {
     process.exit(0);
