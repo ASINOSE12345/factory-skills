@@ -128,12 +128,58 @@ function basenameTok(tok: string): string {
   return tok.split("/").pop() ?? tok;
 }
 
+// Commands that PREFIX another command (the real command follows, after their flags):
+// `sudo git push`, `env FOO=1 git push`, `nice -n 10 git push`, `xargs git push`, …
+const EXEC_PREFIXES = new Set([
+  "sudo", "doas", "env", "nohup", "time", "nice", "ionice", "stdbuf",
+  "setsid", "command", "exec", "xargs", "builtin",
+]);
+
+// Short flags (for the prefixes above) that consume the FOLLOWING token as a value.
+const PREFIX_ARG_FLAGS = new Set([
+  "-u", "-g", "-n", "-I", "-i", "-P", "-L", "-o", "-e", "-a", "-s", "-p", "-w",
+]);
+
+/** Strip surrounding subshell/group punctuation so the command head is visible:
+ *  `(git push)` → `git push`, `{ git push` → `git push`. */
+function stripGrouping(segment: string): string {
+  return segment.replace(/^[(){}\s]+/, "").replace(/[(){}\s]+$/, "");
+}
+
+/** Drop leading exec-prefix words and their flags so `sudo git push` /
+ *  `xargs -n1 git push` / `env FOO=1 git push` expose `git push` as the head. */
+function skipExecPrefixes(tokens: string[]): string[] {
+  let i = 0;
+  while (i < tokens.length && EXEC_PREFIXES.has(basenameTok(tokens[i]))) {
+    i++; // the prefix word itself
+    while (i < tokens.length) {
+      const t = tokens[i];
+      if (!t.startsWith("-") && t.includes("=")) { i++; continue; }   // env VAR=val
+      if (t.startsWith("-")) {
+        i += PREFIX_ARG_FLAGS.has(t) && i + 1 < tokens.length ? 2 : 1; // flag (+ its value)
+        continue;
+      }
+      break; // first real token after the prefix and its flags
+    }
+  }
+  return tokens.slice(i);
+}
+
+/** Remove a single pair of surrounding quotes (eval's payload re-parses quoted). */
+function dequote(s: string): string {
+  const t = s.trim();
+  if (t.length >= 2 && ((t[0] === '"' && t.endsWith('"')) || (t[0] === "'" && t.endsWith("'")))) {
+    return t.slice(1, -1);
+  }
+  return t;
+}
+
 // ─── Verifier detection (one segment) ────────────────────────────────────────
 
 /** Does ONE segment invoke a verifier as its leading command? */
 function segmentIsVerifier(segment: string): boolean {
-  const s = stripLeadingEnvAssignments(segment);
-  const tokens = tokenize(s);
+  const s = stripLeadingEnvAssignments(stripGrouping(segment));
+  const tokens = skipExecPrefixes(tokenize(s));
   if (tokens.length === 0) return false;
 
   const head = basenameTok(tokens[0]);
@@ -308,9 +354,13 @@ export function isPushCommand(command: string): boolean {
 }
 
 function segmentIsPush(segment: string): boolean {
-  const tokens = tokenize(stripLeadingEnvAssignments(segment));
+  const tokens = skipExecPrefixes(tokenize(stripLeadingEnvAssignments(stripGrouping(segment))));
   if (tokens.length === 0) return false;
   const head = basenameTok(tokens[0]);
+  if (head === "eval") {
+    // eval <args>: the args form a command string that re-parses and runs.
+    return isPushCommand(dequote(tokens.slice(1).join(" ")));
+  }
   if (head === "git") {
     let i = 1;
     while (i < tokens.length) {

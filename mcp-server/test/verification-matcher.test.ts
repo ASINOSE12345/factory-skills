@@ -200,3 +200,28 @@ describe("command-substitution bypass prevention ($(...) / backticks)", () => {
   it(`echo '$(git push)' → NOT push (single quotes do not expand)`, () =>
     expect(isPushCommand("echo '$(git push)'")).toBe(false));
 });
+
+// ─── Indirect-execution bypass prevention (eval / grouping / exec-prefixes) ───
+describe("indirect-execution bypass prevention", () => {
+  const PUSHES = [
+    `eval "git push"`, `eval git push`, `eval 'git push'`,
+    `(git push)`, `{ git push; }`,
+    `sudo git push`, `env git push`, `nohup git push`, `time git push`,
+    `nice git push`, `command git push`, `exec git push`, `xargs git push`,
+    `sudo -u user git push`, `nice -n 10 git push`, `env FOO=bar git push`,
+  ];
+  it.each(PUSHES)("push detected: %s", (cmd) => expect(isPushCommand(cmd)).toBe(true));
+
+  const NOT_PUSH = [`echo git push`, `sudo echo hi`, `git status`, `echo "git push to prod"`];
+  it.each(NOT_PUSH)("not a push: %s", (cmd) => expect(isPushCommand(cmd)).toBe(false));
+
+  it(`npm test && eval "git push" → mixed (both predicates fire)`, () => {
+    const cmd = `npm test && eval "git push"`;
+    expect(isVerificationCommand(cmd)).toBe(true);
+    expect(isPushCommand(cmd)).toBe(true);
+  });
+
+  const VERIFS = [`sudo npm test`, `(npm test)`, `nice -n 10 vitest`, `time npx tsc --noEmit`];
+  it.each(VERIFS)("verification through prefix/grouping: %s", (cmd) =>
+    expect(isVerificationCommand(cmd)).toBe(true));
+});
