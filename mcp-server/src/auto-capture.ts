@@ -32,6 +32,7 @@ import {
   updatePatternCounter,
 } from "./neurons.js";
 import matter from "gray-matter";
+import { classifyVerification, isPushCommand } from "./verification-matcher.js";
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -416,6 +417,77 @@ function checkPatternPromotion(neuronsDir: string, neuronId: string, occurrences
   return null;
 }
 
+// ─── Iron Gates State Bridge ─────────────────────────────────
+// Shared with iron-gates.ts (PreToolUse Gate 2). auto-capture is the ONLY writer
+// of verification_passed: it records a pass only when the command is a real,
+// pipe-safe verifier (classifyVerification), exited 0, and is NOT also a push.
+
+const IRON_GATES_STATE_FILE = "/tmp/iron-gates-state.json";
+
+interface IronGatesState {
+  session_id: string;
+  last_verification_at: string | null;
+  last_verification_cmd: string | null;
+  active_error: string | null;
+  fix_attempts: Record<string, number>;
+  verification_passed: boolean;
+}
+
+function loadIronGatesState(sessionId: string): IronGatesState {
+  try {
+    if (existsSync(IRON_GATES_STATE_FILE)) {
+      const state: IronGatesState = JSON.parse(readFileSync(IRON_GATES_STATE_FILE, "utf-8"));
+      if (state.session_id === sessionId) return state;
+    }
+  } catch { /* fresh state */ }
+  return {
+    session_id: sessionId,
+    last_verification_at: null,
+    last_verification_cmd: null,
+    active_error: null,
+    fix_attempts: {},
+    verification_passed: false,
+  };
+}
+
+function saveIronGatesState(state: IronGatesState): void {
+  try {
+    writeFileSync(IRON_GATES_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
+  } catch { /* non-critical */ }
+}
+
+/**
+ * Update iron-gates state from a finished Bash command.
+ * Records verification_passed=true ONLY when the command is a trustworthy verifier
+ * (isVerification && safe), it exited 0, AND it is not also a push. Otherwise, if an
+ * error was detected, sets active_error (used by Gate 5's fix-attempt cap).
+ */
+function updateIronGatesState(
+  sessionId: string,
+  command: string,
+  exitCode: number,
+  errorFingerprint: string | null,
+): void {
+  const state = loadIronGatesState(sessionId);
+
+  const verdict = classifyVerification(command);
+  if (verdict.isVerification && verdict.safe && exitCode === 0 && !isPushCommand(command)) {
+    state.verification_passed = true;
+    state.last_verification_at = new Date().toISOString();
+    state.last_verification_cmd = command.slice(0, 200);
+    state.active_error = null;
+    state.fix_attempts = {};
+    saveIronGatesState(state);
+    return;
+  }
+
+  if (errorFingerprint) {
+    state.active_error = errorFingerprint;
+    state.verification_passed = false;
+    saveIronGatesState(state);
+  }
+}
+
 // ─── Main ────────────────────────────────────────────────────
 
 async function main() {
@@ -466,6 +538,14 @@ async function main() {
       ?? (stderr.trim().length > 0 ? 1 : 0);
   }
 
+  // Bridge to iron-gates Gate 2: record verification BEFORE shouldIgnore (a passing
+  // test/build is often an "ignored" command, yet must still mark the session verified).
+  // updateIronGatesState re-checks safe && exit 0 && !push, so unsafe pipes / mixed
+  // verify+push commands are NOT recorded.
+  if (classifyVerification(command).isVerification) {
+    updateIronGatesState(input.session_id, command, exitCode, null);
+  }
+
   // Check if we should ignore this command
   if (shouldIgnore(command, stderr, exitCode)) {
     process.exit(0);
@@ -486,6 +566,9 @@ async function main() {
   if (!errorSig) {
     process.exit(0);
   }
+
+  // Record the active error for Gate 5's fix-attempt cap.
+  updateIronGatesState(input.session_id, command, exitCode, errorSig.fingerprint);
 
   // Check for dedup — does this error already exist?
   const existingId = findExistingNeuron(neuronsDir, errorSig.fingerprint);
