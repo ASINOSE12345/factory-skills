@@ -147,3 +147,37 @@ describe("recording contract (pure-logic equivalent of updateIronGatesState)", (
   it("mixed verify+push + exit 0 → no record", () =>
     expect(shouldRecord("npm test && git push", 0)).toBe(false));
 });
+
+// ─── Shell-wrapper unwrapping — push must not hide inside a -c payload ────────
+describe("shell-wrapper bypass prevention (bash -c / -lc / sh -c)", () => {
+  it("bash -c 'git push' → push", () =>
+    expect(isPushCommand("bash -c 'git push'")).toBe(true));
+  it("bash -lc 'git push' → push", () =>
+    expect(isPushCommand("bash -lc 'git push'")).toBe(true));
+  it("sh -c 'gh pr create --fill' → push", () =>
+    expect(isPushCommand("sh -c 'gh pr create --fill'")).toBe(true));
+  it("/bin/bash -lc 'git push' → push", () =>
+    expect(isPushCommand("/bin/bash -lc 'git push'")).toBe(true));
+  it(`bash -c 'echo "git push"' → NOT push`, () =>
+    expect(isPushCommand(`bash -c 'echo "git push"'`)).toBe(false));
+  it("npm test && bash -c 'git push' → mixed (both predicates true)", () => {
+    const cmd = "npm test && bash -c 'git push'";
+    expect(isVerificationCommand(cmd)).toBe(true);
+    expect(isPushCommand(cmd)).toBe(true);
+  });
+  it("npm test && bash -c 'git push' → NOT recorded (push guard fires)", () => {
+    const cmd = "npm test && bash -c 'git push'";
+    const v = classifyVerification(cmd);
+    expect(v.isVerification && v.safe && !isPushCommand(cmd)).toBe(false);
+  });
+  it("bash -lc 'npm test' → verification (unwrap generalizes)", () => {
+    const v = classifyVerification("bash -lc 'npm test'");
+    expect(v.isVerification).toBe(true);
+    expect(v.safe).toBe(true);
+  });
+  it("bash -c 'npm test' ; rm -rf x → unsafe (wrapper not unwrapped past ;)", () => {
+    const v = classifyVerification("bash -c 'npm test' ; rm -rf x");
+    expect(v.isVerification).toBe(true);
+    expect(v.safe).toBe(false);
+  });
+});

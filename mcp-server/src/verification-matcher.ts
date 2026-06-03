@@ -176,22 +176,29 @@ function segmentIsVerifier(segment: string): boolean {
 
 // ─── bash -c unwrapping ──────────────────────────────────────────────────────
 
-/** Extract the inner payload of `bash/sh [flags] -c '<payload>'`, reading the
- *  quoted payload from the RAW segment (before any global quote-blanking would
- *  hide it). Returns null when there is no such wrapper. */
+/** Extract the inner payload of `bash/sh/zsh/dash [flags] -c '<payload>'`, reading
+ *  the quoted payload from the RAW segment (before any global quote-blanking would
+ *  hide it). The flag bundle may END in `c` (-c, -lc, -ic, -lic, …) so login/
+ *  interactive wrappers like `bash -lc 'git push'` are unwrapped too. Returns null
+ *  when there is no such wrapper. */
 function unwrapShellC(rawSegment: string): string | null {
-  const m = rawSegment.match(/\b(?:bash|sh)\b[^|;&\n]*?\s-c\s+(?:'([^']*)'|"([^"]*)")/);
+  const m = rawSegment.match(/\b(?:bash|sh|zsh|dash)\b[^|;&\n]*?\s-[A-Za-z]*c\s+(?:'([^']*)'|"([^"]*)")/);
   if (!m) return null;
   return m[1] ?? m[2] ?? null;
 }
 
-/** The command whose exit code we actually analyze: the bash -c payload if the
- *  command is such a wrapper, else the command itself. Unwrapping the payload
- *  BEFORE the segment/pipe analysis is what lets us see an inner `vitest | tail`
- *  (which lives inside the -c quotes) instead of losing it to quote-blanking. */
+/** The command whose exit code we actually analyze: the shell -c payload when the
+ *  wrapper IS the whole command, else the command itself. Unwrapping BEFORE the
+ *  segment/pipe analysis lets us see an inner `vitest | tail` (which lives inside the
+ *  -c quotes) instead of losing it to quote-blanking. We only unwrap a SINGLE-segment
+ *  command: if the wrapper is one of several segments (`bash -c 'npm test' ; rm -rf x`),
+ *  unwrapping would drop the trailing `; rm …` and hide a masking operator. */
 function getEffectiveCommand(command: string): string {
-  const inner = unwrapShellC(command);
-  return inner !== null ? inner : command;
+  if (splitSegments(command).length === 1) {
+    const inner = unwrapShellC(command);
+    if (inner !== null) return inner;
+  }
+  return command;
 }
 
 // ─── Public predicates ───────────────────────────────────────────────────────
@@ -239,6 +246,11 @@ export function hasPipefail(command: string): boolean {
  *  `gh pr merge` — tolerating flags between the binary and the subcommand
  *  (`git -C repo push`) and ignoring quoted/echoed mentions (`echo "git push"`). */
 export function isPushCommand(command: string): boolean {
+  // Recurse into a shell wrapper so `bash -lc 'git push'` and
+  // `npm test && bash -c 'git push'` are caught — the push hides inside the -c payload,
+  // mirroring isVerificationCommand's unwrap so neither predicate can be bypassed.
+  const inner = unwrapShellC(command);
+  if (inner !== null && isPushCommand(inner)) return true;
   return splitSegments(command).some(segmentIsPush);
 }
 
