@@ -201,6 +201,54 @@ function getEffectiveCommand(command: string): string {
   return command;
 }
 
+/** Blank ONLY single-quoted spans (their contents never expand in bash). Double
+ *  quotes are preserved because command substitutions inside "..." DO execute. */
+function blankSingleQuotedSpans(input: string): string {
+  let out = "";
+  let inSingle = false;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (inSingle) {
+      if (ch === "'") { out += ch; inSingle = false; }
+      else { out += ch === "\n" ? "\n" : " "; }
+    } else if (ch === "'") {
+      inSingle = true; out += ch;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+/** Inner code of command substitutions in EXECUTABLE context: `$(...)` and
+ *  backtick `...` that are NOT inside single quotes (inside double quotes they
+ *  still run). `echo "$(git push)"` → ["git push"]; `echo '$(git push)'` → [].
+ *  Positions are located on the single-quote-masked copy but sliced from the
+ *  original (equal length) so the returned code is real. */
+function extractCommandSubstitutions(command: string): string[] {
+  const src = blankSingleQuotedSpans(command);
+  const out: string[] = [];
+  for (let i = 0; i < src.length; i++) {
+    if (src[i] === "$" && src[i + 1] === "(") {
+      let depth = 1;
+      let j = i + 2;
+      while (j < src.length && depth > 0) {
+        if (src[j] === "(") depth++;
+        else if (src[j] === ")") { depth--; if (depth === 0) break; }
+        j++;
+      }
+      out.push(command.slice(i + 2, j));
+      i = j;
+    } else if (src[i] === "`") {
+      let j = i + 1;
+      while (j < src.length && src[j] !== "`") j++;
+      out.push(command.slice(i + 1, j));
+      i = j;
+    }
+  }
+  return out;
+}
+
 // ─── Public predicates ───────────────────────────────────────────────────────
 
 /** True if some segment of the command invokes a recognized verifier as a real
@@ -246,11 +294,16 @@ export function hasPipefail(command: string): boolean {
  *  `gh pr merge` — tolerating flags between the binary and the subcommand
  *  (`git -C repo push`) and ignoring quoted/echoed mentions (`echo "git push"`). */
 export function isPushCommand(command: string): boolean {
-  // Recurse into a shell wrapper so `bash -lc 'git push'` and
-  // `npm test && bash -c 'git push'` are caught — the push hides inside the -c payload,
-  // mirroring isVerificationCommand's unwrap so neither predicate can be bypassed.
+  // 1. Shell wrapper: `bash -lc 'git push'` — the push hides inside the -c payload.
   const inner = unwrapShellC(command);
   if (inner !== null && isPushCommand(inner)) return true;
+  // 2. Command substitutions in executable context: `echo $(git push)`,
+  //    `echo "$(git push)"`, backticks — the push runs even though it is not a
+  //    top-level segment. (Single-quoted `'$(git push)'` does not expand.)
+  for (const sub of extractCommandSubstitutions(command)) {
+    if (isPushCommand(sub)) return true;
+  }
+  // 3. Top-level segments.
   return splitSegments(command).some(segmentIsPush);
 }
 

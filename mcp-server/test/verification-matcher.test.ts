@@ -181,3 +181,22 @@ describe("shell-wrapper bypass prevention (bash -c / -lc / sh -c)", () => {
     expect(v.safe).toBe(false);
   });
 });
+
+// ─── Command-substitution unwrapping — push must not hide in $(...) / backticks ──
+describe("command-substitution bypass prevention ($(...) / backticks)", () => {
+  it("echo $(git push) → push", () =>
+    expect(isPushCommand("echo $(git push)")).toBe(true));
+  it(`echo "$(git push)" → push (executes inside double quotes)`, () =>
+    expect(isPushCommand(`echo "$(git push)"`)).toBe(true));
+  it("echo `git push` (backticks) → push", () =>
+    expect(isPushCommand("echo `git push`")).toBe(true));
+  it("echo $(gh pr create --fill) → push", () =>
+    expect(isPushCommand("echo $(gh pr create --fill)")).toBe(true));
+  it("npm test && echo $(git push) → mixed (both predicates true)", () => {
+    const cmd = "npm test && echo $(git push)";
+    expect(isVerificationCommand(cmd)).toBe(true);
+    expect(isPushCommand(cmd)).toBe(true);
+  });
+  it(`echo '$(git push)' → NOT push (single quotes do not expand)`, () =>
+    expect(isPushCommand("echo '$(git push)'")).toBe(false));
+});
