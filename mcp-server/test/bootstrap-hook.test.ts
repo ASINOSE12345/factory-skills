@@ -1,0 +1,184 @@
+import { describe, it, expect, afterEach } from "vitest";
+import {
+  mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, statSync, utimesSync,
+} from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { buildBootstrap, resolveClaudeHome } from "../src/bootstrap-hook";
+
+// ─── fixture helpers (real files in a temp dir — no mocks) ───────────────────
+const created: string[] = [];
+function mkTmp(prefix: string): string {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  created.push(d);
+  return d;
+}
+function writeNeuron(neuronsDir: string, cat: string, id: string, title: string): void {
+  const dir = join(neuronsDir, cat);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${id}.md`), `# ${title}\n\nbody for ${id}\n`, "utf-8");
+}
+function snapshot(dir: string): Record<string, number> {
+  const acc: Record<string, number> = {};
+  const walk = (d: string) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else acc[p] = statSync(p).mtimeMs;
+    }
+  };
+  walk(dir);
+  return acc;
+}
+
+afterEach(() => {
+  for (const d of created.splice(0)) {
+    try { rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
+});
+
+describe("buildBootstrap", () => {
+  // 1. No neurons dir → "" (degraded, never blocks the session)
+  it("returns empty output when there is no neurons dir", () => {
+    const project = mkTmp("boot-noneu-");
+    const home = mkTmp("boot-home-");
+    const saved = process.env.FACTORY_ROOT;
+    process.env.FACTORY_ROOT = project; // fallback also points at a dir WITHOUT neurons/
+    try {
+      expect(buildBootstrap(project, home)).toBe("");
+    } finally {
+      if (saved === undefined) delete process.env.FACTORY_ROOT;
+      else process.env.FACTORY_ROOT = saved;
+    }
+  });
+
+  // 2. Knowledge-base stats with category counts
+  it("reports knowledge-base stats with category counts", () => {
+    const project = mkTmp("boot-stats-");
+    const home = mkTmp("boot-home-");
+    const neu = join(project, "neurons");
+    writeNeuron(neu, "errors", "NE-001", "Err one");
+    writeNeuron(neu, "errors", "NE-002", "Err two");
+    writeNeuron(neu, "decisions", "ND-001", "Dec one");
+    writeNeuron(neu, "patterns", "NP-001", "Pat one");
+    writeNeuron(neu, "foundations", "NF-001", "Found one");
+    writeNeuron(neu, "business", "NB-001", "Biz one");
+    const out = buildBootstrap(project, home);
+    expect(out).toContain("🧠 Knowledge base: 6 neurons");
+    expect(out).toContain("NE:2");
+    expect(out).toContain("ND:1");
+    expect(out).toContain("NP:1");
+    expect(out).toContain("NF:1");
+    expect(out).toContain("NB:1");
+    expect(out).toContain("search_neurons");
+  });
+
+  // 2b. Empty knowledge base → minimal hint only
+  it("emits a minimal hint when the knowledge base is empty", () => {
+    const project = mkTmp("boot-empty-");
+    const home = mkTmp("boot-home-");
+    mkdirSync(join(project, "neurons", "errors"), { recursive: true }); // dir exists, 0 neurons
+    const out = buildBootstrap(project, home);
+    expect(out).toContain("empty");
+    expect(out).toContain("create_neuron");
+    expect(out).not.toContain("Knowledge base:");
+  });
+
+  // 3. Active plan — most recent by mtime, preview clipped
+  it("shows the most recent plan with a clipped preview", () => {
+    const project = mkTmp("boot-plan-");
+    const home = mkTmp("boot-home-");
+    writeNeuron(join(project, "neurons"), "errors", "NE-001", "x"); // ≥1 neuron to reach the plan section
+    const planDir = join(home, "plans");
+    mkdirSync(planDir, { recursive: true });
+    writeFileSync(join(planDir, "old.md"), "# Old Plan\n\nold body\n", "utf-8");
+    writeFileSync(join(planDir, "new.md"), `# New Plan Title\n\n${"x".repeat(500)}\n`, "utf-8");
+    const t0 = new Date("2020-01-01T00:00:00Z");
+    const t1 = new Date("2020-06-01T00:00:00Z");
+    utimesSync(join(planDir, "old.md"), t0, t0);
+    utimesSync(join(planDir, "new.md"), t1, t1);
+    const out = buildBootstrap(project, home);
+    expect(out).toContain("📋 Plan activo: New Plan Title");
+    expect(out).not.toContain("Old Plan");
+    // preview must be clipped: longest run of x's never exceeds MAX_PREVIEW (200)
+    const longestX = (out.match(/x+/g) ?? []).reduce((m, s) => Math.max(m, s.length), 0);
+    expect(longestX).toBeLessThanOrEqual(200);
+  });
+
+  // 4. Last session from MEMORY.md — only the last line, not the whole file
+  it("shows the last archived session line, not the whole file", () => {
+    const project = mkTmp("boot-sess-");
+    const home = mkTmp("boot-home-");
+    writeNeuron(join(project, "neurons"), "errors", "NE-001", "x");
+    const memDir = join(home, "projects", "-Users-x-factory", "memory");
+    mkdirSync(memDir, { recursive: true });
+    writeFileSync(
+      join(memDir, "MEMORY.md"),
+      "# Index\n- Session 2026-01-01: first\n- Session 2026-02-02: second\n- Session 2026-03-03: latest\nother line\n",
+      "utf-8",
+    );
+    const out = buildBootstrap(project, home);
+    expect(out).toContain("📌 Última sesión: Session 2026-03-03: latest");
+    expect(out).not.toContain("2026-01-01"); // earlier sessions are not shown
+    expect(out).not.toContain("2026-02-02");
+    expect(out).not.toContain("# Index"); // does not dump the file header
+  });
+
+  // 5. Degradation — absent plans/memory dirs and weird markdown never crash
+  it("degrades cleanly when plans/memory dirs are absent", () => {
+    const project = mkTmp("boot-deg-");
+    const home = mkTmp("boot-home-"); // empty home: no plans/, no projects/
+    writeNeuron(join(project, "neurons"), "errors", "NE-001", "x");
+    const out = buildBootstrap(project, home);
+    expect(out).toContain("🧠 Knowledge base: 1 neurons");
+    expect(out).not.toContain("📋");
+    expect(out).not.toContain("📌");
+  });
+
+  it("does not crash on weird markdown / heading-less plan", () => {
+    const project = mkTmp("boot-weird-");
+    const home = mkTmp("boot-home-");
+    writeNeuron(join(project, "neurons"), "errors", "NE-001", "x");
+    const planDir = join(home, "plans");
+    mkdirSync(planDir, { recursive: true });
+    writeFileSync(join(planDir, "weird.md"), "weird markdown: no heading, no frontmatter\n", "utf-8");
+    expect(() => buildBootstrap(project, home)).not.toThrow();
+    expect(buildBootstrap(project, home)).toContain("Knowledge base: 1 neurons");
+  });
+
+  // 6. Read-only — no file in home or project is created or modified
+  it("is read-only: no files created or modified", () => {
+    const project = mkTmp("boot-ro-");
+    const home = mkTmp("boot-home-");
+    writeNeuron(join(project, "neurons"), "errors", "NE-001", "x");
+    const planDir = join(home, "plans");
+    mkdirSync(planDir, { recursive: true });
+    writeFileSync(join(planDir, "p.md"), "# P\n\nbody\n", "utf-8");
+    const memDir = join(home, "projects", "-factory", "memory");
+    mkdirSync(memDir, { recursive: true });
+    writeFileSync(join(memDir, "MEMORY.md"), "- Session 2026-01-01: s\n", "utf-8");
+
+    const beforeHome = snapshot(home);
+    const beforeProject = snapshot(project);
+    buildBootstrap(project, home);
+    expect(snapshot(home)).toEqual(beforeHome);
+    expect(snapshot(project)).toEqual(beforeProject);
+  });
+});
+
+describe("resolveClaudeHome", () => {
+  it("honors the CLAUDE_HOME override (for tests), defaults otherwise", () => {
+    const saved = process.env.CLAUDE_HOME;
+    process.env.CLAUDE_HOME = "/tmp/fake-claude-home";
+    try {
+      expect(resolveClaudeHome()).toBe("/tmp/fake-claude-home");
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_HOME;
+      else process.env.CLAUDE_HOME = saved;
+    }
+    // default branch (no override) ends in /.claude
+    if (saved === undefined) {
+      expect(resolveClaudeHome().endsWith("/.claude")).toBe(true);
+    }
+  });
+});
