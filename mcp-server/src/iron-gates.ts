@@ -17,8 +17,9 @@
  * Registered in ~/.claude/settings.json as PreToolUse hook.
  */
 
-import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 import { isVerificationCommand, isPushCommand } from "./verification-matcher.js";
+import { type GateState, loadState, saveState } from "./iron-gates-state.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -28,15 +29,6 @@ interface HookInput {
   session_id?: string;
   cwd?: string;
   hook_event_name?: string;
-}
-
-interface GateState {
-  session_id: string;
-  last_verification_at: string | null;
-  last_verification_cmd: string | null;
-  active_error: string | null;
-  fix_attempts: Record<string, number>;
-  verification_passed: boolean;
 }
 
 interface BlockResult {
@@ -52,7 +44,6 @@ type GateResult = BlockResult | AllowResult;
 
 // ─── Constants ──────────────────────────────────────────────
 
-const STATE_FILE = "/tmp/iron-gates-state.json";
 const OVERRIDE_FILE = "/tmp/iron-gates-override.json";
 
 interface Override {
@@ -100,30 +91,9 @@ const VERIFICATION_WINDOW_MINUTES = 10;
 // Max fix attempts before escalation
 const MAX_FIX_ATTEMPTS = 3;
 
-// ─── State Management ───────────────────────────────────────
-
-function loadState(sessionId: string): GateState {
-  try {
-    if (existsSync(STATE_FILE)) {
-      const state: GateState = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
-      if (state.session_id === sessionId) return state;
-    }
-  } catch { /* fresh state */ }
-  return {
-    session_id: sessionId,
-    last_verification_at: null,
-    last_verification_cmd: null,
-    active_error: null,
-    fix_attempts: {},
-    verification_passed: false,
-  };
-}
-
-function saveState(state: GateState): void {
-  try {
-    writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
-  } catch { /* non-critical */ }
-}
+// State storage (per-session) lives in iron-gates-state.ts (loadState/saveState),
+// shared with auto-capture.ts. Each session has its OWN file, so concurrent
+// sessions/worktrees can't clobber each other's verification_passed.
 
 // ─── Gate Functions ─────────────────────────────────────────
 
@@ -272,6 +242,7 @@ function gateFixCap(
   toolName: string,
   toolInput: Record<string, unknown>,
   state: GateState,
+  cwd?: string,
 ): GateResult {
   if (toolName !== "Edit") return {};
   if (!state.active_error) return {};
@@ -300,7 +271,7 @@ function gateFixCap(
 
   // Increment counter
   state.fix_attempts[state.active_error] = attempts + 1;
-  saveState(state);
+  saveState(state, cwd);
 
   return {};
 }
@@ -335,7 +306,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const state = loadState(sessionId);
+  const state = loadState(sessionId, input.cwd);
 
   // Run all gates — first block wins
   const gates: GateResult[] = [
@@ -343,7 +314,7 @@ async function main(): Promise<void> {
     gateVerificationBeforePush(toolName, toolInput, state),
     gateDeployFlag(toolName, toolInput),
     gateFileShrink(toolName, toolInput),
-    gateFixCap(toolName, toolInput, state),
+    gateFixCap(toolName, toolInput, state, input.cwd),
   ];
 
   for (const result of gates) {
