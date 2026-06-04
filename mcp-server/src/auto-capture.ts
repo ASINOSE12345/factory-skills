@@ -35,6 +35,7 @@ import {
 import matter from "gray-matter";
 import { classifyVerification, isPushCommand } from "./verification-matcher.js";
 import { redactSecrets } from "./redact.js";
+import { loadState as loadIronGatesState, saveState as saveIronGatesState } from "./iron-gates-state.js";
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -457,39 +458,9 @@ function checkPatternPromotion(neuronsDir: string, neuronId: string, occurrences
 // of verification_passed: it records a pass only when the command is a real,
 // pipe-safe verifier (classifyVerification), exited 0, and is NOT also a push.
 
-const IRON_GATES_STATE_FILE = "/tmp/iron-gates-state.json";
-
-interface IronGatesState {
-  session_id: string;
-  last_verification_at: string | null;
-  last_verification_cmd: string | null;
-  active_error: string | null;
-  fix_attempts: Record<string, number>;
-  verification_passed: boolean;
-}
-
-function loadIronGatesState(sessionId: string): IronGatesState {
-  try {
-    if (existsSync(IRON_GATES_STATE_FILE)) {
-      const state: IronGatesState = JSON.parse(readFileSync(IRON_GATES_STATE_FILE, "utf-8"));
-      if (state.session_id === sessionId) return state;
-    }
-  } catch { /* fresh state */ }
-  return {
-    session_id: sessionId,
-    last_verification_at: null,
-    last_verification_cmd: null,
-    active_error: null,
-    fix_attempts: {},
-    verification_passed: false,
-  };
-}
-
-function saveIronGatesState(state: IronGatesState): void {
-  try {
-    writeFileSync(IRON_GATES_STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
-  } catch { /* non-critical */ }
-}
+// Per-session state storage lives in iron-gates-state.ts (imported above as
+// loadIronGatesState/saveIronGatesState). Each session has its OWN file, so two
+// sessions/worktrees can't clobber each other's verification_passed.
 
 /**
  * Gate 2 recording contract — the ONLY condition under which verification_passed
