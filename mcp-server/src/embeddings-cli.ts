@@ -1,20 +1,26 @@
 /**
- * embeddings-cli — safe, incremental, auditable (re)generation of the neuron
- * embedding cache (.neuron-embeddings.json).
+ * embeddings-cli — safe, incremental, auditable (re)generation of a neuron
+ * embedding cache, now PROVIDER-AWARE (gemini | openai | local).
  *
  * Design (deliberate, deterministic, no silent fallbacks):
- *  - `--dry-run` is EXPLICIT. We NEVER auto-switch to dry-run because a key is
- *    missing. No key + not dry-run ⇒ exit 1. No key + dry-run ⇒ exit 0, no API.
+ *  - Provider abstraction (see embedding-providers.ts). Each (provider, model)
+ *    has its OWN cache file; the Gemini default keeps the legacy
+ *    `.neuron-embeddings.json` (the MCP server reads it, untouched). Dimensions
+ *    are declared per provider — never inferred. The CLI REFUSES to load a cache
+ *    whose model/dimensions disagree with the active provider, and refuses any
+ *    embedding whose length differs from the provider's dimensions. That is how
+ *    incompatible vector geometries can never be mixed.
+ *  - `--dry-run` is EXPLICIT. We NEVER auto-switch to dry-run because credentials
+ *    are missing. No creds + not dry-run ⇒ exit 1. No creds + dry-run ⇒ exit 0.
  *  - Targeted by default: `--ids` embeds exactly those; otherwise only the
  *    missing+stale set; a full rebuild requires explicit `--force-full`.
  *  - Safe writer (mirrors NP-059): backup the index, write a temp file, then
  *    atomic `rename`. A corrupt index aborts unless `--force-rebuild`. If ANY
  *    embedding fails, nothing is written and the original index is left intact.
  *  - Never touches the markdown corpus (read-only) — verified by hashing the
- *    corpus before/after. Never logs neuron content, vectors, or the API key.
+ *    corpus before/after. Never logs neuron content, vectors, or any API key.
  *
- * This module imports ONLY already-exported helpers (`embedText`, `listNeurons`)
- * and changes nothing in embeddings.ts — the live server path is untouched.
+ * Imports only already-exported helpers; embeddings.ts is unchanged.
  */
 
 import {
@@ -24,17 +30,11 @@ import {
   copyFileSync,
   renameSync,
   rmSync,
-  statSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { embedText } from "./embeddings.js";
 import { listNeurons } from "./neurons.js";
-
-const CACHE_FILENAME = ".neuron-embeddings.json";
-const DEFAULT_MODEL = "gemini-embedding-001";
-const DEFAULT_DIMENSIONS = 3072;
+import { getProvider, resolveCachePath, PROVIDER_NAMES, type EmbeddingProvider } from "./embedding-providers.js";
 
 export interface EmbeddingEntry {
   vector: number[];
@@ -48,6 +48,10 @@ export interface EmbeddingCache {
 
 export interface EmbeddingsCliOptions {
   neuronsDir: string;
+  /** Provider name (default "gemini"). */
+  provider?: string;
+  /** Model override (default = the provider's default model). */
+  model?: string;
   /** Filenames or bare IDs (NP-059 or NP-059.md). */
   ids?: string[];
   dryRun: boolean;
@@ -58,10 +62,9 @@ export interface EmbeddingsCliOptions {
 }
 
 export interface EmbeddingsCliDeps {
-  /** Defaults to the real Gemini embedder. Tests inject a mock (no network). */
-  embedFn?: (text: string) => Promise<number[] | null>;
-  /** Defaults to reading GEMINI_API_KEY from env. */
-  hasApiKey?: () => boolean;
+  /** Provider override for tests (mock embedder, no network). Defaults to the
+   *  real registry provider resolved from opts.provider/opts.model. */
+  provider?: EmbeddingProvider;
   /** Injectable clock for deterministic tests. */
   now?: () => string;
   /** Logger — receives only counts/IDs, never content/vectors/keys. */
@@ -71,6 +74,9 @@ export interface EmbeddingsCliDeps {
 export interface EmbeddingsCliResult {
   exitCode: number;
   mode: "dry-run" | "write" | "noop" | "error";
+  provider: string;
+  model: string;
+  dimensions: number;
   cachePath: string;
   totalEntriesBefore: number;
   totalEntriesAfter: number;
@@ -85,10 +91,6 @@ export interface EmbeddingsCliResult {
   backupPath: string | null;
   mdHashStable: boolean | null;
   reason?: string;
-}
-
-function cachePathFor(neuronsDir: string): string {
-  return join(dirname(neuronsDir), CACHE_FILENAME);
 }
 
 /** Normalize a bare ID or filename to a `.md` filename. */
@@ -114,28 +116,28 @@ export async function runEmbeddings(
   opts: EmbeddingsCliOptions,
   deps: EmbeddingsCliDeps = {},
 ): Promise<EmbeddingsCliResult> {
-  const embedFn = deps.embedFn ?? embedText;
-  const hasApiKey = deps.hasApiKey ?? (() => !!process.env.GEMINI_API_KEY);
   const now = deps.now ?? (() => new Date().toISOString());
   const log = deps.log ?? ((l: string) => console.error(l));
 
-  const cachePath = cachePathFor(opts.neuronsDir);
+  // ── Resolve the provider (fail-closed on unknown provider/model) ──────────
+  let provider: EmbeddingProvider;
+  try {
+    provider = deps.provider ?? getProvider(opts.provider ?? "gemini", opts.model);
+  } catch (e) {
+    return {
+      exitCode: 1, mode: "error", provider: opts.provider ?? "gemini", model: opts.model ?? "?",
+      dimensions: 0, cachePath: "", totalEntriesBefore: 0, totalEntriesAfter: 0, corpusCount: 0,
+      present: 0, missing: [], stale: [], targets: [], embedded: [], failed: [], wrote: false,
+      backupPath: null, mdHashStable: null, reason: String((e as Error).message),
+    };
+  }
+
+  const cachePath = resolveCachePath(provider, opts.neuronsDir);
   const base: EmbeddingsCliResult = {
-    exitCode: 0,
-    mode: "noop",
-    cachePath,
-    totalEntriesBefore: 0,
-    totalEntriesAfter: 0,
-    corpusCount: 0,
-    present: 0,
-    missing: [],
-    stale: [],
-    targets: [],
-    embedded: [],
-    failed: [],
-    wrote: false,
-    backupPath: null,
-    mdHashStable: null,
+    exitCode: 0, mode: "noop", provider: provider.name, model: provider.model, dimensions: provider.dimensions,
+    cachePath, totalEntriesBefore: 0, totalEntriesAfter: 0, corpusCount: 0,
+    present: 0, missing: [], stale: [], targets: [], embedded: [], failed: [],
+    wrote: false, backupPath: null, mdHashStable: null,
   };
 
   if (!opts.neuronsDir || !existsSync(opts.neuronsDir)) {
@@ -148,9 +150,10 @@ export async function runEmbeddings(
   base.corpusCount = neurons.length;
 
   // ── Load the index (strict) ──────────────────────────────────────────────
+  const emptyCache = (): EmbeddingCache => ({ model: provider.model, dimensions: provider.dimensions, entries: {} });
   let cache: EmbeddingCache;
   if (!existsSync(cachePath)) {
-    cache = { model: DEFAULT_MODEL, dimensions: DEFAULT_DIMENSIONS, entries: {} };
+    cache = emptyCache();
   } else {
     try {
       cache = JSON.parse(readFileSync(cachePath, "utf-8")) as EmbeddingCache;
@@ -160,14 +163,26 @@ export async function runEmbeddings(
     } catch (e) {
       if (!opts.forceRebuild) {
         return {
-          ...base,
-          mode: "error",
-          exitCode: 1,
+          ...base, mode: "error", exitCode: 1,
           reason: `index is corrupt/unreadable (${String((e as Error).message)}) — pass --force-rebuild to start fresh`,
         };
       }
-      cache = { model: DEFAULT_MODEL, dimensions: DEFAULT_DIMENSIONS, entries: {} };
+      cache = emptyCache();
     }
+  }
+
+  // ── Provider/model/dimensions guard — NEVER mix geometries ───────────────
+  if (cache.model !== provider.model || cache.dimensions !== provider.dimensions) {
+    if (!opts.forceRebuild) {
+      return {
+        ...base, mode: "error", exitCode: 1,
+        reason:
+          `index belongs to ${cache.model}/${cache.dimensions}d but provider is ` +
+          `${provider.model}/${provider.dimensions}d — refusing to mix. ` +
+          `Use the correct --provider/--model, or --force-rebuild to start a fresh index.`,
+      };
+    }
+    cache = emptyCache(); // explicit reset to the active provider's geometry
   }
   base.totalEntriesBefore = Object.keys(cache.entries).length;
 
@@ -177,14 +192,9 @@ export async function runEmbeddings(
   const stale: string[] = [];
   for (const n of neurons) {
     const entry = cache.entries[n.filename];
-    if (!entry) {
-      missing.push(n.filename);
-    } else if (n.modified.toISOString() > entry.updated) {
-      stale.push(n.filename);
-      present.push(n.filename);
-    } else {
-      present.push(n.filename);
-    }
+    if (!entry) missing.push(n.filename);
+    else if (n.modified.toISOString() > entry.updated) { stale.push(n.filename); present.push(n.filename); }
+    else present.push(n.filename);
   }
   base.present = present.length;
   base.missing = missing.slice().sort();
@@ -195,11 +205,8 @@ export async function runEmbeddings(
   if (opts.ids && opts.ids.length > 0) {
     const wanted = opts.ids.map(toFilename);
     const found = wanted.filter((f) => byFile.has(f));
-    const notFound = wanted.filter((f) => !byFile.has(f));
-    for (const f of notFound) log(`[embeddings] WARN: --ids target not in corpus: ${f}`);
-    if (found.length === 0) {
-      return { ...base, mode: "error", exitCode: 1, reason: `none of the given --ids exist in corpus` };
-    }
+    for (const f of wanted.filter((f) => !byFile.has(f))) log(`[embeddings] WARN: --ids target not in corpus: ${f}`);
+    if (found.length === 0) return { ...base, mode: "error", exitCode: 1, reason: `none of the given --ids exist in corpus` };
     targets = found;
   } else if (opts.forceFull) {
     targets = neurons.map((n) => n.filename);
@@ -210,7 +217,8 @@ export async function runEmbeddings(
   base.targets = targets;
 
   log(
-    `[embeddings] corpus=${neurons.length} indexed=${base.totalEntriesBefore} ` +
+    `[embeddings] provider=${provider.name}/${provider.model} (${provider.dimensions}d) ` +
+      `corpus=${neurons.length} indexed=${base.totalEntriesBefore} ` +
       `missing=${missing.length} stale=${stale.length} targets=${targets.length}`,
   );
 
@@ -220,13 +228,11 @@ export async function runEmbeddings(
     return { ...base, mode: "dry-run", exitCode: 0, totalEntriesAfter: base.totalEntriesBefore };
   }
 
-  // ── Key gate (explicit, no silent fallback to dry-run) ───────────────────
-  if (!hasApiKey()) {
+  // ── Credential gate (explicit, no silent fallback) ───────────────────────
+  if (!provider.hasCredentials()) {
     return {
-      ...base,
-      mode: "error",
-      exitCode: 1,
-      reason: `GEMINI_API_KEY not set — refusing to run without --dry-run (no silent fallback)`,
+      ...base, mode: "error", exitCode: 1,
+      reason: `provider '${provider.name}' has no credentials — refusing to run without --dry-run (no silent fallback)`,
     };
   }
 
@@ -235,38 +241,40 @@ export async function runEmbeddings(
     return { ...base, mode: "noop", exitCode: 0, totalEntriesAfter: base.totalEntriesBefore };
   }
 
-  // ── Embed all targets; abort wholesale on any failure ────────────────────
+  // ── Embed all targets; abort wholesale on any failure or dim mismatch ─────
   const mdBefore = corpusMdDigest(opts.neuronsDir);
   const fresh = new Map<string, number[]>();
   const failed: string[] = [];
+  let dimMismatch = false;
   for (const filename of targets) {
     const n = byFile.get(filename)!;
     const text = `${n.title}\n\n${n.content.slice(0, 1500)}`;
     let vector: number[] | null = null;
     try {
-      vector = await embedFn(text);
+      vector = await provider.embed(text);
     } catch {
       vector = null;
     }
-    if (vector && vector.length > 0) fresh.set(filename, vector);
-    else failed.push(filename);
+    if (vector && vector.length === provider.dimensions) {
+      fresh.set(filename, vector);
+    } else {
+      if (vector && vector.length !== provider.dimensions) dimMismatch = true;
+      failed.push(filename);
+    }
   }
   if (failed.length > 0) {
     return {
-      ...base,
-      mode: "error",
-      exitCode: 1,
-      failed: failed.sort(),
-      reason: `embedding failed for ${failed.length} target(s) — index left intact, nothing written`,
+      ...base, mode: "error", exitCode: 1, failed: failed.sort(),
+      reason: dimMismatch
+        ? `embedding returned wrong dimensions (expected ${provider.dimensions}d) — index left intact, nothing written`
+        : `embedding failed for ${failed.length} target(s) — index left intact, nothing written`,
     };
   }
 
-  // ── Merge, backup, atomic write ──────────────────────────────────────────
-  for (const [filename, vector] of fresh) {
-    cache.entries[filename] = { vector, updated: now() };
-  }
-  const first = Object.values(cache.entries)[0];
-  if (first) cache.dimensions = first.vector.length;
+  // ── Merge + authoritative geometry, backup, atomic write ─────────────────
+  for (const [filename, vector] of fresh) cache.entries[filename] = { vector, updated: now() };
+  cache.model = provider.model;          // authoritative — never inferred from a vector
+  cache.dimensions = provider.dimensions;
 
   let backupPath: string | null = null;
   const tmpPath = `${cachePath}.tmp.${process.pid}`;
@@ -278,37 +286,23 @@ export async function runEmbeddings(
     writeFileSync(tmpPath, JSON.stringify(cache), "utf-8");
     renameSync(tmpPath, cachePath); // atomic on the same filesystem
   } catch (e) {
-    try {
-      if (existsSync(tmpPath)) rmSync(tmpPath, { force: true });
-    } catch {
-      /* best effort */
-    }
+    try { if (existsSync(tmpPath)) rmSync(tmpPath, { force: true }); } catch { /* best effort */ }
     return {
-      ...base,
-      mode: "error",
-      exitCode: 1,
-      backupPath,
+      ...base, mode: "error", exitCode: 1, backupPath,
       reason: `write failed (${String((e as Error).message)}) — original index intact${backupPath ? " (backup kept)" : ""}`,
     };
   }
 
-  const mdAfter = corpusMdDigest(opts.neuronsDir);
-  const mdHashStable = mdBefore === mdAfter;
-
+  const mdHashStable = mdBefore === corpusMdDigest(opts.neuronsDir);
   log(
-    `[embeddings] wrote ${fresh.size} embedding(s); total ${Object.keys(cache.entries).length}; ` +
-      `backup=${backupPath ? "yes" : "none"}; md_stable=${mdHashStable}`,
+    `[embeddings] wrote ${fresh.size} embedding(s) to ${provider.name}/${provider.model}; ` +
+      `total ${Object.keys(cache.entries).length}; backup=${backupPath ? "yes" : "none"}; md_stable=${mdHashStable}`,
   );
 
   return {
-    ...base,
-    mode: "write",
-    exitCode: mdHashStable ? 0 : 1,
-    embedded: [...fresh.keys()].sort(),
-    totalEntriesAfter: Object.keys(cache.entries).length,
-    wrote: true,
-    backupPath,
-    mdHashStable,
+    ...base, mode: "write", exitCode: mdHashStable ? 0 : 1,
+    embedded: [...fresh.keys()].sort(), totalEntriesAfter: Object.keys(cache.entries).length,
+    wrote: true, backupPath, mdHashStable,
     reason: mdHashStable ? undefined : "markdown corpus changed during run — investigate",
   };
 }
@@ -320,6 +314,8 @@ function parseArgs(argv: string[]): EmbeddingsCliOptions {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--neurons-dir") o.neuronsDir = argv[++i] ?? "";
+    else if (a === "--provider") o.provider = argv[++i] ?? "";
+    else if (a === "--model") o.model = argv[++i] ?? "";
     else if (a === "--ids") o.ids = (argv[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     else if (a === "--dry-run") o.dryRun = true;
     else if (a === "--force-full") o.forceFull = true;
@@ -331,7 +327,10 @@ function parseArgs(argv: string[]): EmbeddingsCliOptions {
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
   if (!opts.neuronsDir) {
-    console.error("usage: embeddings --neurons-dir <dir> [--ids A,B] [--dry-run] [--force-full] [--force-rebuild]");
+    console.error(
+      `usage: embeddings --neurons-dir <dir> [--provider ${PROVIDER_NAMES.join("|")}] [--model M] ` +
+        `[--ids A,B] [--dry-run] [--force-full] [--force-rebuild]`,
+    );
     process.exit(1);
   }
   const result = await runEmbeddings(opts);
