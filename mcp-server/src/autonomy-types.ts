@@ -31,6 +31,9 @@ export type FindingDimension =
  *  - recommendation: the proposed next step (still just a proposal)
  */
 export interface Finding {
+  /** Stable id assigned by the orchestrator (`<dimension>#<index>`), so every
+   *  action can reference the exact finding that justified it. */
+  id?: string;
   dimension: FindingDimension;
   ids: string[];
   evidence: string[];
@@ -123,9 +126,11 @@ export const DEFAULT_AUTONOMY: AutonomyOptions = {
   maxActions: 50,
 };
 
-/** An append-only ledger record. No raw content, no secrets. */
+/** An append-only ledger record — the FULL internal audit trail. No raw
+ *  content, no secrets. Surfaced in the MCP payload only behind `detail:"full"`. */
 export interface LedgerEntry {
   seq: number;
+  finding_id?: string;
   detector: FindingDimension;
   ids: string[];
   evidence: string[];
@@ -135,4 +140,19 @@ export interface LedgerEntry {
   action_type: AnyActionType;
   status: ActionStatus;
   reason: string;
+  summary: string;
+}
+
+/** Compact action for the default MCP payload. Carries NO evidence/inference/
+ *  recommendation and NO ids — all of those live on the referenced finding
+ *  (look it up by `finding_id`). This avoids repeating a 14-20 id cluster on
+ *  every one of its actions, which is what bloated the payload. */
+export interface CompactAction {
+  seq: number;
+  finding_id?: string;
+  detector: FindingDimension;
+  action_type: AnyActionType;
+  status: ActionStatus;
+  reason: string;
+  summary: string;
 }

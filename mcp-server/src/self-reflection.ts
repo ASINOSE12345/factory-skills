@@ -143,11 +143,12 @@ export function clusterMirrors(
         dimension: "mirror_cluster",
         ids,
         evidence: [
-          `${ids.length} near-identical neurons (cosine ≥ ${threshold})`,
+          `${ids.length} neurons in a connected mirror component (each linked by cosine ≥ ${threshold})`,
+          `min edge similarity ${minSim.toFixed(3)} — pairwise transitivity, NOT every pair`,
           `category=${cat}`,
           `scope=${scope}`,
         ],
-        inference: `Redundant capture cluster — likely the same knowledge stored ${ids.length} times.`,
+        inference: `Connected mirror component — each neuron is near-identical to at least one other (transitively linked); likely redundant captures. Not every pair is necessarily near-identical.`,
         recommendation: `Keep one canonical neuron; propose consolidating/archiving the other ${ids.length - 1}. (Memory is sacred — consolidate, never delete blindly.)`,
         confidence: ids.length >= 4 ? "high" : "medium",
       });

@@ -63,6 +63,19 @@ describe("clusterMirrors", () => {
     const v = vecMap([["NB-1", [1, 0, 0]], ["NB-2", [0.8, 0.6, 0]]]); // cosine 0.8 < 0.97
     expect(clusterMirrors(ns, v, 0.97)).toHaveLength(0);
   });
+  it("a connected component (A-B & B-C over threshold, A-C below) is reported as such — NOT as all-pairs near-identical", () => {
+    // A·B = 0.98, B·C ≈ 0.989 (both edges), A·C = 0.94 (NOT an edge).
+    const ns = ["NB-1", "NB-2", "NB-3"].map((id) => mk(id, "business", { project: "ProjectAlpha" }));
+    const v = vecMap([["NB-1", [1, 0, 0]], ["NB-2", [0.98, 0.199, 0]], ["NB-3", [0.94, 0.341, 0]]]);
+    const f = clusterMirrors(ns, v, 0.97);
+    expect(f).toHaveLength(1);
+    expect(f[0].ids).toHaveLength(3); // transitively connected
+    const ev = f[0].evidence.join(" ");
+    expect(ev).toMatch(/connected mirror component/);
+    expect(ev).toMatch(/min edge similarity 0\.98/); // the weakest EDGE, not the weakest pair
+    expect(f[0].inference).toMatch(/Not every pair/); // honest about transitivity
+    expect(f[0].evidence.join(" ")).not.toMatch(/near-identical neurons \(cosine/); // no false all-pairs claim
+  });
 });
 
 // ── Detector 2: citation graph ───────────────────────────────────────────────
@@ -255,5 +268,25 @@ describe("reflect — orchestrator over a real fixture", () => {
   it("reports honest embeddings coverage", () => {
     const r = reflect(neuronsDir, reportOpts);
     expect(r.embeddings_covered).toBe(7);
+  });
+
+  it("plans actions ONLY over visible findings; every action references a shown finding_id (max_items=1)", () => {
+    const r = reflect(neuronsDir, { ...reportOpts, maxItems: 1 });
+    const visibleIds = new Set(Object.values(r.findings).flatMap((d) => d.shown.map((f) => f.id)));
+    expect(r.planned_actions.length).toBeGreaterThan(0);
+    for (const a of r.planned_actions) {
+      expect(a.finding_id).toBeDefined();
+      expect(visibleIds.has(a.finding_id)).toBe(true); // never references a hidden finding
+    }
+    expect(r.total_planned_actions).toBe(r.planned_actions.length);
+  });
+
+  it("compact payload (default) carries no evidence/inference/recommendation per action; full does", () => {
+    const compact = reflect(neuronsDir, reportOpts);
+    expect(compact.detail).toBe("compact");
+    expect(compact.planned_actions.every((a) => !("evidence" in a) && !("inference" in a))).toBe(true);
+    const full = reflect(neuronsDir, { ...reportOpts, detail: "full" });
+    expect(full.detail).toBe("full");
+    expect(full.planned_actions.every((a) => "evidence" in a && "inference" in a)).toBe(true);
   });
 });

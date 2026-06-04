@@ -28,6 +28,7 @@ export class ActionLedger {
   record(decision: PolicyDecision): LedgerEntry {
     const entry: LedgerEntry = {
       seq: this.seq++,
+      finding_id: decision.finding.id,
       detector: decision.finding.dimension,
       ids: [...decision.finding.ids],
       evidence: [...decision.finding.evidence],
@@ -37,6 +38,7 @@ export class ActionLedger {
       action_type: decision.action_type,
       status: decision.status,
       reason: decision.reason,
+      summary: decision.summary,
     };
     this.entries.push(entry);
     return entry;
