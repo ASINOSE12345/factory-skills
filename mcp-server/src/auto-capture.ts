@@ -22,6 +22,7 @@
 
 import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import {
   resolveNeuronsDir,
@@ -85,6 +86,39 @@ interface HookOutput {
   hookSpecificOutput?: {
     additionalContext?: string;
   };
+}
+
+// ─── Hook event → (exitCode, stderr) ─────────────────────────
+// Claude Code routes a finished Bash call to ONE of two MUTUALLY EXCLUSIVE events:
+//   • PostToolUse        — fired ONLY when the command exited 0. Carries
+//     `tool_response` ({ stdout, stderr, … }) and, critically, NO exit_code field.
+//   • PostToolUseFailure — fired ONLY on a non-zero exit. Carries `error` (a string
+//     prefixed "Exit code N\n"); there is no tool_response.
+// So the EVENT NAME — not stderr content — is the success/failure signal. We must
+// NOT infer failure from a non-empty `tool_response.stderr`: the Bash tool folds the
+// command's own stderr into `tool_response.stdout` and reserves `tool_response.stderr`
+// for harness notes such as "Shell cwd was reset to <dir>" appended after any `cd`.
+// Reading that note as a failure made a passing `cd repo && npx tsc --noEmit`
+// mis-record as exit 1, so Gate 2 never saw the pass and falsely blocked the next
+// push (confirmed empirically 2026-06-04 by capturing a real PostToolUse payload).
+//
+// The legacy `tool_output` shape (used only by manual/E2E harnesses) DOES carry a
+// numeric exit_code and is honored verbatim.
+export function deriveExitAndStderr(input: HookInput): { exitCode: number; stderr: string } {
+  if (input.hook_event_name === "PostToolUseFailure") {
+    return { exitCode: 1, stderr: (input.error ?? "").replace(/^Exit code \d+\n/, "") };
+  }
+  if (input.tool_output) {
+    const r = input.tool_output;
+    const stderr = r.stderr ?? r.content ?? "";
+    const exitCode = typeof r.exit_code === "number" ? r.exit_code : (stderr.trim().length > 0 ? 1 : 0);
+    return { exitCode, stderr };
+  }
+  // Real PostToolUse ⇒ the command exited 0 by event semantics. Honor an explicit
+  // numeric exit_code only if a future Claude Code version ever starts sending one.
+  const r = input.tool_response ?? {};
+  const exitCode = typeof r.exit_code === "number" ? r.exit_code : 0;
+  return { exitCode, stderr: r.stderr ?? "" };
 }
 
 // ─── Error Classification ────────────────────────────────────
@@ -458,10 +492,23 @@ function saveIronGatesState(state: IronGatesState): void {
 }
 
 /**
+ * Gate 2 recording contract — the ONLY condition under which verification_passed
+ * becomes true:
+ *   pass  ⇔  isVerification ∧ safe ∧ exitCode === 0 ∧ ¬isPushCommand
+ * i.e. a real verifier (vitest/tsc/playwright/npm test|build/…) whose exit code can
+ * be TRUSTED (no `||`, no unguarded `|`, nothing after it via `;`/newline — see
+ * verification-matcher), that exited 0, and is not ALSO a push. Pure + exported so
+ * the anti-masking contract is unit-testable and shared with updateIronGatesState.
+ */
+export function recordsVerificationPass(command: string, exitCode: number): boolean {
+  const verdict = classifyVerification(command);
+  return verdict.isVerification && verdict.safe && exitCode === 0 && !isPushCommand(command);
+}
+
+/**
  * Update iron-gates state from a finished Bash command.
- * Records verification_passed=true ONLY when the command is a trustworthy verifier
- * (isVerification && safe), it exited 0, AND it is not also a push. Otherwise, if an
- * error was detected, sets active_error (used by Gate 5's fix-attempt cap).
+ * Records verification_passed=true ONLY when recordsVerificationPass holds. Otherwise,
+ * if an error was detected, sets active_error (used by Gate 5's fix-attempt cap).
  */
 function updateIronGatesState(
   sessionId: string,
@@ -471,8 +518,7 @@ function updateIronGatesState(
 ): void {
   const state = loadIronGatesState(sessionId);
 
-  const verdict = classifyVerification(command);
-  if (verdict.isVerification && verdict.safe && exitCode === 0 && !isPushCommand(command)) {
+  if (recordsVerificationPass(command, exitCode)) {
     state.verification_passed = true;
     state.last_verification_at = new Date().toISOString();
     state.last_verification_cmd = redactSecrets(command).slice(0, 200);
@@ -523,26 +569,13 @@ async function main() {
   // body/title/rootCause and iron-gates last_verification_cmd) derives from
   // command/stderr/stdout, so scrubbing here covers every field.
   const command = redactSecrets(input.tool_input?.command ?? "");
-  const isFailure = input.hook_event_name === "PostToolUseFailure";
 
-  // Build stderr from the right source depending on hook type
-  let stderr: string;
-  let exitCode: number;
-
-  if (isFailure) {
-    // PostToolUseFailure: error is a string, no tool_response
-    // Strip "Exit code N\n" prefix — Claude Code prepends it
-    stderr = (input.error ?? "").replace(/^Exit code \d+\n/, "");
-    exitCode = 1;
-  } else {
-    // PostToolUse (success) or legacy format
-    const response = input.tool_response ?? input.tool_output ?? {};
-    stderr = response.stderr ?? (response as Record<string, unknown>).content as string ?? "";
-    exitCode = (response as Record<string, unknown>).exit_code as number
-      ?? (stderr.trim().length > 0 ? 1 : 0);
-  }
-
-  stderr = redactSecrets(stderr);
+  // Derive the real exit code + stderr from the hook EVENT (PostToolUse ⇒ exit 0,
+  // PostToolUseFailure ⇒ exit 1). See deriveExitAndStderr: stderr non-emptiness is
+  // NOT a failure signal, so harness noise like "Shell cwd was reset" no longer
+  // masquerades as exit 1.
+  const { exitCode, stderr: rawStderr } = deriveExitAndStderr(input);
+  const stderr = redactSecrets(rawStderr);
 
   // Bridge to iron-gates Gate 2: record verification BEFORE shouldIgnore (a passing
   // test/build is often an "ignored" command, yet must still mark the session verified).
@@ -652,7 +685,10 @@ _Pending — to be filled after fix is verified_
   process.exit(0);
 }
 
-main().catch(() => {
-  // Never crash the hook — exit silently
-  process.exit(0);
-});
+// Execute only when run directly (`node auto-capture.js`), not when imported by tests.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch(() => {
+    // Never crash the hook — exit silently
+    process.exit(0);
+  });
+}
