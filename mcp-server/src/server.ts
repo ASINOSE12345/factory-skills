@@ -27,6 +27,7 @@ import {
 import { getNeuronVectors } from "./embeddings.js";
 import { analyzeGaps } from "./gap-analysis.js";
 import { dreamScan, formatMarkdown } from "./dream-scan.js";
+import { reflect, formatReflectMarkdown } from "./reflect.js";
 
 const VERSION = "0.1.0";
 
@@ -417,6 +418,51 @@ server.tool(
       });
     } catch (e) {
       return neuronError("LIST_FAILED", String(e));
+    }
+  }
+);
+
+/**
+ * TOOL: reflect_neurons
+ * Self-reflection over the WHOLE brain. Cognition (detectors → findings) is
+ * separated from action (planner → autonomy policy → ledger). Read-only by
+ * default: proposes, never writes. Autonomy (create_*) is gated by mode +
+ * explicit flags + !dry_run, and in CP2A there is no execution layer, so even
+ * then nothing is written — the policy decisions are returned for audit.
+ */
+server.tool(
+  "reflect_neurons",
+  "Self-reflection over the WHOLE neuron brain (read-only by default): mirror clusters, citation-graph " +
+  "integrity, contradiction candidates, self-knowledge (recurring errors without a preventive pattern), " +
+  "and dogma candidates. Separates cognition (detectors→findings, with evidence/inference/recommendation) " +
+  "from action (planner→policy→ledger). Returns findings AND planned_actions with their policy status. " +
+  "Defaults mode=report + dry_run=true → proposes, never writes. Deterministic, no LLM.",
+  {
+    mode: z.enum(["report", "autonomous"]).optional().default("report").describe("report = propose only; autonomous = create_* become eligible (still gated by flags + dry_run)"),
+    dry_run: z.boolean().optional().default(true).describe("When true (default) no write/issue is performed even if otherwise eligible"),
+    create_issues: z.boolean().optional().default(false).describe("Explicit gate for create_issue (needs autonomous + !dry_run)"),
+    write_proposed_neurons: z.boolean().optional().default(false).describe("Explicit gate for create_proposed_neuron (needs autonomous + !dry_run)"),
+    max_actions: z.number().int().min(1).max(500).optional().default(50).describe("Cap on actions considered in one run"),
+    max_items: z.number().int().min(1).max(200).optional().default(25).describe("Cap on findings shown per dimension (totals stay honest)"),
+    mirror_threshold: z.number().min(0.8).max(1).optional().default(0.97).describe("Cosine threshold for mirror clusters (default 0.97)"),
+    format: z.enum(["json", "markdown"]).optional().default("json").describe("Output format"),
+  },
+  async ({ mode, dry_run, create_issues, write_proposed_neurons, max_actions, max_items, mirror_threshold, format }) => {
+    try {
+      const report = reflect(neuronsDir, {
+        mode: mode ?? "report",
+        dryRun: dry_run ?? true,
+        createIssues: create_issues ?? false,
+        writeProposedNeurons: write_proposed_neurons ?? false,
+        maxActions: max_actions ?? 50,
+        maxItems: max_items ?? 25,
+        reflection: { mirrorThreshold: mirror_threshold ?? 0.97 },
+      });
+      return format === "markdown"
+        ? wrapResult({ markdown: formatReflectMarkdown(report) })
+        : wrapResult(report);
+    } catch (e) {
+      return neuronError("REFLECT_FAILED", String(e));
     }
   }
 );
