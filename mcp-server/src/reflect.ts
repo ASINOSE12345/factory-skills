@@ -44,6 +44,14 @@ const DIMENSIONS: FindingDimension[] = [
 
 export type ReflectDetail = "compact" | "full";
 
+/** Single source of truth for the reflect_neurons default knobs — shared by the
+ *  MCP tool's Zod schema AND its handler fallback, so the two can never diverge. */
+export const REFLECT_DEFAULTS = {
+  maxItems: 3,
+  maxActions: 20,
+  detail: "compact" as ReflectDetail,
+} as const;
+
 export interface ReflectOptions extends AutonomyOptions {
   /** Cap on findings shown per dimension in the report (totals stay honest). */
   maxItems: number;

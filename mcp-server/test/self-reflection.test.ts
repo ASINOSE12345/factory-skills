@@ -10,7 +10,7 @@ import {
   reflectSelfKnowledge,
   detectDogmaCandidates,
 } from "../src/self-reflection";
-import { reflect } from "../src/reflect";
+import { reflect, REFLECT_DEFAULTS } from "../src/reflect";
 import { resetProjectAliasCache, type Neuron, type NeuronCategory } from "../src/neurons";
 
 // ── In-memory neuron builder (pure-detector tests, no disk) ──────────────────
@@ -288,5 +288,11 @@ describe("reflect — orchestrator over a real fixture", () => {
     const full = reflect(neuronsDir, { ...reportOpts, detail: "full" });
     expect(full.detail).toBe("full");
     expect(full.planned_actions.every((a) => "evidence" in a && "inference" in a)).toBe(true);
+  });
+});
+
+describe("REFLECT_DEFAULTS — default contract (MCP schema and handler share this)", () => {
+  it("locks the documented defaults so the Zod default and the handler fallback can't diverge", () => {
+    expect(REFLECT_DEFAULTS).toEqual({ maxItems: 3, maxActions: 20, detail: "compact" });
   });
 });

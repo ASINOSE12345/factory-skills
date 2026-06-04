@@ -27,7 +27,7 @@ import {
 import { getNeuronVectors } from "./embeddings.js";
 import { analyzeGaps } from "./gap-analysis.js";
 import { dreamScan, formatMarkdown } from "./dream-scan.js";
-import { reflect, formatReflectMarkdown } from "./reflect.js";
+import { reflect, formatReflectMarkdown, REFLECT_DEFAULTS } from "./reflect.js";
 
 const VERSION = "0.1.0";
 
@@ -442,9 +442,9 @@ server.tool(
     dry_run: z.boolean().optional().default(true).describe("When true (default) no write/issue is performed even if otherwise eligible"),
     create_issues: z.boolean().optional().default(false).describe("Explicit gate for create_issue (needs autonomous + !dry_run)"),
     write_proposed_neurons: z.boolean().optional().default(false).describe("Explicit gate for create_proposed_neuron (needs autonomous + !dry_run)"),
-    max_actions: z.number().int().min(1).max(500).optional().default(20).describe("Cap on actions planned over the VISIBLE findings (default 20)"),
-    max_items: z.number().int().min(1).max(200).optional().default(3).describe("Cap on findings shown per dimension; hidden findings do NOT generate actions (default 3)"),
-    detail: z.enum(["compact", "full"]).optional().default("compact").describe("compact = lean actions (default, <15KB); full = the entire ledger with evidence/inference/recommendation"),
+    max_actions: z.number().int().min(1).max(500).optional().default(REFLECT_DEFAULTS.maxActions).describe(`Cap on actions planned over the VISIBLE findings (default ${REFLECT_DEFAULTS.maxActions})`),
+    max_items: z.number().int().min(1).max(200).optional().default(REFLECT_DEFAULTS.maxItems).describe(`Cap on findings shown per dimension; hidden findings do NOT generate actions (default ${REFLECT_DEFAULTS.maxItems})`),
+    detail: z.enum(["compact", "full"]).optional().default(REFLECT_DEFAULTS.detail).describe("compact = lean actions (default, <15KB); full = the entire ledger with evidence/inference/recommendation"),
     mirror_threshold: z.number().min(0.8).max(1).optional().default(0.97).describe("Cosine threshold for mirror clusters (default 0.97)"),
     format: z.enum(["json", "markdown"]).optional().default("json").describe("Output format"),
   },
@@ -455,9 +455,9 @@ server.tool(
         dryRun: dry_run ?? true,
         createIssues: create_issues ?? false,
         writeProposedNeurons: write_proposed_neurons ?? false,
-        maxActions: max_actions ?? 20,
-        maxItems: max_items ?? 5,
-        detail: detail ?? "compact",
+        maxActions: max_actions ?? REFLECT_DEFAULTS.maxActions,
+        maxItems: max_items ?? REFLECT_DEFAULTS.maxItems,
+        detail: detail ?? REFLECT_DEFAULTS.detail,
         reflection: { mirrorThreshold: mirror_threshold ?? 0.97 },
       });
       // Compact JSON (no pretty-print indentation) — payload size matters for an
