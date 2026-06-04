@@ -1,23 +1,24 @@
 /**
- * Iron Gates state — shared, PER-SESSION storage.
+ * Iron Gates state — shared, PER-SESSION + PER-WORKTREE storage.
  *
  * Single source of truth for the Gate 2 verification state, used by BOTH hooks:
  *  - auto-capture.ts (the only WRITER of verification_passed)
  *  - iron-gates.ts  (the READER that gates push/PR/merge)
  *
  * Why this exists: the state used to live in ONE global file
- * (`/tmp/iron-gates-state.json`) keyed only by session_id in its *contents*. Two
- * sessions/worktrees running concurrently clobbered each other's file — session
- * B's write made session A's verification "belong to another session", so A's
- * next push was falsely blocked (reproduced race). Here the session_id is part
- * of the PATH, so each session has its own file and cannot be clobbered.
+ * (`/tmp/iron-gates-state.json`). Two sessions clobbered each other's file. A
+ * first fix keyed the path by session_id, but that still let a single session
+ * inherit a verification across DIFFERENT worktrees (verify in repo A, push in
+ * repo B). So the key is now (session_id, worktree): a verification in one
+ * worktree never enables a push in another, even within one session.
  *
  * The override file (`iron-gates-override.json`) stays global by design — the
  * operator creates it by hand; it is not part of this isolation.
  */
 
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname, resolve } from "node:path";
+import { createHash } from "node:crypto";
 
 export interface GateState {
   session_id: string;
@@ -43,9 +44,36 @@ export function sanitizeSessionId(sessionId: string): string {
   return s.length > 0 ? s : "unknown";
 }
 
-/** The per-session state file for a given session_id. */
-export function statePath(sessionId: string): string {
-  return join(stateDir(), `${PREFIX}${sanitizeSessionId(sessionId)}.json`);
+/**
+ * Stable fingerprint of the WORKTREE a command runs in. Walks up from cwd to the
+ * worktree root (the first ancestor containing a `.git` file or dir) and hashes
+ * it; subdirectories of the same worktree map to the same fingerprint. With no
+ * cwd or no `.git` ancestor it falls back to the cwd itself (or "nocwd").
+ */
+export function worktreeFingerprint(cwd?: string): string {
+  if (!cwd) return "nocwd";
+  let dir: string;
+  try {
+    dir = resolve(cwd);
+  } catch {
+    return "nocwd";
+  }
+  let root = dir;
+  while (true) {
+    if (existsSync(join(root, ".git"))) break;
+    const parent = dirname(root);
+    if (parent === root) {
+      root = dir; // reached fs root with no .git → key by the cwd itself
+      break;
+    }
+    root = parent;
+  }
+  return createHash("sha1").update(root).digest("hex").slice(0, 12);
+}
+
+/** Per-(session, worktree) state file path. */
+export function statePath(sessionId: string, cwd?: string): string {
+  return join(stateDir(), `${PREFIX}${sanitizeSessionId(sessionId)}-${worktreeFingerprint(cwd)}.json`);
 }
 
 /** The legacy global state file (pre-isolation). Read-only compat. */
@@ -76,29 +104,41 @@ function readIfMatches(file: string, sessionId: string): GateState | null {
 }
 
 /**
- * Load THIS session's state from its own per-session file. Never inherits
- * another session's state. Falls back to the legacy global file only if that
- * file belongs to this same session (one-time migration on the next save).
+ * Load THIS (session, worktree)'s state. Never inherits another session's OR
+ * another worktree's state.
+ *
+ * Legacy compat: the pre-isolation global file is read once, ONLY for the same
+ * session — but its verification_passed is NOT inherited, because the global
+ * file has no worktree info and trusting its pass could leak a verification
+ * across worktrees. A fresh verification is required; active_error/fix_attempts
+ * (Gate 5 continuity) are preserved.
  */
-export function loadState(sessionId: string): GateState {
-  const own = readIfMatches(statePath(sessionId), sessionId);
+export function loadState(sessionId: string, cwd?: string): GateState {
+  const own = readIfMatches(statePath(sessionId, cwd), sessionId);
   if (own) return own;
   const legacy = readIfMatches(legacyPath(), sessionId);
-  if (legacy) return legacy; // migrates to per-session on the next saveState
+  if (legacy) {
+    return {
+      ...legacy,
+      verification_passed: false,
+      last_verification_at: null,
+      last_verification_cmd: null,
+    };
+  }
   return freshState(sessionId);
 }
 
-/** Persist state to THIS session's own per-session file. Never the global one. */
-export function saveState(state: GateState): void {
+/** Persist state to THIS (session, worktree)'s own file. Never the global one. */
+export function saveState(state: GateState, cwd?: string): void {
   try {
-    writeFileSync(statePath(state.session_id), JSON.stringify(state, null, 2), "utf-8");
+    writeFileSync(statePath(state.session_id, cwd), JSON.stringify(state, null, 2), "utf-8");
   } catch {
     /* non-critical */
   }
   cleanupStale(); // opportunistic; never removes the file we just wrote
 }
 
-/** Best-effort removal of per-session state files older than STALE_MS. */
+/** Best-effort removal of per-session/worktree state files older than STALE_MS. */
 export function cleanupStale(now: number = Date.now()): void {
   let files: string[];
   try {

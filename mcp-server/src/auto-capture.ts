@@ -486,8 +486,9 @@ function updateIronGatesState(
   command: string,
   exitCode: number,
   errorFingerprint: string | null,
+  cwd: string,
 ): void {
-  const state = loadIronGatesState(sessionId);
+  const state = loadIronGatesState(sessionId, cwd);
 
   if (recordsVerificationPass(command, exitCode)) {
     state.verification_passed = true;
@@ -495,14 +496,14 @@ function updateIronGatesState(
     state.last_verification_cmd = redactSecrets(command).slice(0, 200);
     state.active_error = null;
     state.fix_attempts = {};
-    saveIronGatesState(state);
+    saveIronGatesState(state, cwd);
     return;
   }
 
   if (errorFingerprint) {
     state.active_error = errorFingerprint;
     state.verification_passed = false;
-    saveIronGatesState(state);
+    saveIronGatesState(state, cwd);
   }
 }
 
@@ -553,7 +554,7 @@ async function main() {
   // updateIronGatesState re-checks safe && exit 0 && !push, so unsafe pipes / mixed
   // verify+push commands are NOT recorded.
   if (classifyVerification(command).isVerification) {
-    updateIronGatesState(input.session_id, command, exitCode, null);
+    updateIronGatesState(input.session_id, command, exitCode, null, input.cwd);
   }
 
   // Check if we should ignore this command
@@ -578,7 +579,7 @@ async function main() {
   }
 
   // Record the active error for Gate 5's fix-attempt cap.
-  updateIronGatesState(input.session_id, command, exitCode, errorSig.fingerprint);
+  updateIronGatesState(input.session_id, command, exitCode, errorSig.fingerprint, input.cwd);
 
   // Check for dedup — does this error already exist?
   const existingId = findExistingNeuron(neuronsDir, errorSig.fingerprint);

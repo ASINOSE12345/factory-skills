@@ -242,6 +242,7 @@ function gateFixCap(
   toolName: string,
   toolInput: Record<string, unknown>,
   state: GateState,
+  cwd?: string,
 ): GateResult {
   if (toolName !== "Edit") return {};
   if (!state.active_error) return {};
@@ -270,7 +271,7 @@ function gateFixCap(
 
   // Increment counter
   state.fix_attempts[state.active_error] = attempts + 1;
-  saveState(state);
+  saveState(state, cwd);
 
   return {};
 }
@@ -305,7 +306,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const state = loadState(sessionId);
+  const state = loadState(sessionId, input.cwd);
 
   // Run all gates — first block wins
   const gates: GateResult[] = [
@@ -313,7 +314,7 @@ async function main(): Promise<void> {
     gateVerificationBeforePush(toolName, toolInput, state),
     gateDeployFlag(toolName, toolInput),
     gateFileShrink(toolName, toolInput),
-    gateFixCap(toolName, toolInput, state),
+    gateFixCap(toolName, toolInput, state, input.cwd),
   ];
 
   for (const result of gates) {
