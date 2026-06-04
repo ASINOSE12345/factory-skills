@@ -1,11 +1,14 @@
 /**
  * reflect — the orchestrator that wires the staged pipeline:
  *
- *   detectors → findings → action planner → autonomy policy → ledger
+ *   detectors → findings → action planner → autonomy policy → executor? → ledger
  *
  * It owns NO detection logic and NO policy logic — it only sequences them and
- * records the result. Read-only in CP2A: no execution layer exists, so any
- * decision the policy marks "executed" is DOWNGRADED here to "proposed".
+ * records the result. Read-only by default: with no `stagingRoot` configured,
+ * any decision the policy marks "executed" is DOWNGRADED here to "proposed" (the
+ * CP2 safety net). With `stagingRoot` set (CP3), an "executed" decision is handed
+ * to the executor, which writes a STAGING artifact only — never the live corpus,
+ * never GitHub; a write failure or guard rejection becomes "blocked".
  *
  * Auditability contract (hardened after PR #7 review):
  *  - Every finding gets a stable `id` (`<dimension>#<index>`).
@@ -26,9 +29,11 @@ import { planActions } from "./action-planner.js";
 import { decideAction } from "./autonomy-policy.js";
 import { ActionLedger, type LedgerSummary } from "./action-ledger.js";
 import { ExternalSourceLedger, type ExternalSourceRef } from "./external-source-ledger.js";
+import { executeAction } from "./executor.js";
 import type {
   AutonomyOptions,
   CompactAction,
+  ExecutionRecord,
   Finding,
   FindingDimension,
   LedgerEntry,
@@ -59,6 +64,14 @@ export interface ReflectOptions extends AutonomyOptions {
   detail?: ReflectDetail;
   /** Detector tuning (thresholds, injectable now). */
   reflection?: ReflectionOptions;
+  /**
+   * CP3 executor gate (deployment-level). When set, an "executed" decision is
+   * materialized as a STAGING artifact under this root (never the live corpus,
+   * never GitHub). When undefined (the default, and the live runtime until the
+   * operator sets FACTORY_STAGING_DIR), the CP2 safety net stands: "executed"
+   * is degraded to "proposed" and nothing is written.
+   */
+  stagingRoot?: string;
 }
 
 export interface ReflectReport {
@@ -95,12 +108,15 @@ function toCompact(e: LedgerEntry): CompactAction {
     status: e.status,
     reason: e.reason,
     summary: e.summary,
+    ...(e.execution ? { execution: e.execution } : {}),
   };
 }
 
 /**
- * Run a full reflection pass. Read-only in CP2A. `opts.reflection.now` makes the
- * timestamp and all date-based detectors deterministic for tests.
+ * Run a full reflection pass. Read-only by default; with `opts.stagingRoot` set
+ * (CP3), policy-"executed" actions are materialized as STAGING artifacts only —
+ * never the live corpus, never GitHub. `opts.reflection.now` makes the timestamp
+ * and all date-based detectors deterministic for tests.
  */
 export function reflect(neuronsDir: string, opts: ReflectOptions): ReflectReport {
   const now = opts.reflection?.now ?? new Date();
@@ -141,7 +157,14 @@ export function reflect(neuronsDir: string, opts: ReflectOptions): ReflectReport
     );
   }
 
-  // findings (VISIBLE only) → planner → policy → ledger, capped by maxActions.
+  // CP3 executor context — built ONLY when a staging root is configured. Its
+  // presence is the deployment-level gate: no staging root ⇒ no execution layer.
+  const execCtx = opts.stagingRoot
+    ? { stagingRoot: opts.stagingRoot, neuronsDir, now }
+    : null;
+  let staged = 0;
+
+  // findings (VISIBLE only) → planner → policy → executor? → ledger, capped by maxActions.
   let considered = 0;
   let capped = false;
   outer: for (const finding of visible) {
@@ -153,14 +176,29 @@ export function reflect(neuronsDir: string, opts: ReflectOptions): ReflectReport
       considered++;
 
       let decision = decideAction(candidate, opts);
+      let execution: ExecutionRecord | undefined;
 
-      // CP2A safety net: no execution layer. Never let a status be "executed".
+      // Only the policy can hand us "executed" (autonomous + flag + !dry-run).
       if (decision.status === "executed") {
-        decision = {
-          ...decision,
-          status: "proposed",
-          reason: `${decision.reason}; execution layer deferred to CP3 (no write performed)`,
-        };
+        if (execCtx) {
+          // CP3 governed executor: materialize to STAGING only — redacted, path
+          // re-validated against the live corpus, never GitHub. Failure ⇒ blocked.
+          const outcome = executeAction(decision, execCtx);
+          if (outcome.status === "executed") {
+            execution = outcome.execution;
+            decision = { ...decision, reason: `${decision.reason}; ${outcome.reason}` };
+            staged++;
+          } else {
+            decision = { ...decision, status: "blocked", reason: `execution blocked — ${outcome.reason}` };
+          }
+        } else {
+          // CP2 safety net: no staging configured ⇒ never actually execute.
+          decision = {
+            ...decision,
+            status: "proposed",
+            reason: `${decision.reason}; execution layer inactive (no staging configured) — no write performed`,
+          };
+        }
       }
 
       // An external-review action registers the request (validated, never fetched).
@@ -168,11 +206,16 @@ export function reflect(neuronsDir: string, opts: ReflectOptions): ReflectReport
         ext.register("other", finding.ids[0] ?? "n/a", finding.recommendation.slice(0, 200));
       }
 
-      ledger.record(decision);
+      ledger.record(decision, execution);
     }
   }
   if (capped) {
     notes.push(`action planning capped at max_actions=${opts.maxActions} over the visible findings.`);
+  }
+  if (staged > 0) {
+    notes.push(
+      `CP3 executor active: ${staged} action(s) materialized as STAGING artifacts under ${opts.stagingRoot} — live corpus untouched, no GitHub.`,
+    );
   }
 
   const full = [...ledger.all()];
@@ -227,9 +270,13 @@ export function formatReflectMarkdown(r: ReflectReport): string {
   }
 
   const s = r.action_summary;
-  lines.push(`## Planned actions — ${r.total_planned_actions} (executed ${s.executed} · proposed ${s.proposed} · blocked ${s.blocked})`);
+  lines.push(`## Planned actions — ${r.total_planned_actions} (executed-staged ${s.executed} · proposed ${s.proposed} · blocked ${s.blocked})`);
   for (const a of r.planned_actions) {
-    lines.push(`- [${a.status}] ${a.action_type} ← ${a.finding_id ?? a.detector} — ${a.reason}`);
+    // An "executed" action is, by construction, a STAGED write — render it as
+    // such so it can never be mistaken for a production side effect.
+    const label = a.status === "executed" ? "executed-staged" : a.status;
+    const staged = a.execution ? ` → staging:${a.execution.artifact}` : "";
+    lines.push(`- [${label}] ${a.action_type} ← ${a.finding_id ?? a.detector} — ${a.reason}${staged}`);
   }
   lines.push("");
   if (r.external_reviews.length > 0) {

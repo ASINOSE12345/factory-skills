@@ -126,6 +126,19 @@ export const DEFAULT_AUTONOMY: AutonomyOptions = {
   maxActions: 50,
 };
 
+/**
+ * Proof that an "executed" action materialized — and WHERE. The CP3 executor
+ * writes ONLY to staging, so `target` is the literal `"staging"`; there is no
+ * code path that produces any other target. The invariant the whole layer rests
+ * on: a LedgerEntry has `status:"executed"` IFF it carries an `execution` whose
+ * `target` is `"staging"`. No execution ⇒ not executed; no other target exists.
+ */
+export interface ExecutionRecord {
+  target: "staging";
+  /** Path of the written artifact, relative to the staging root. */
+  artifact: string;
+}
+
 /** An append-only ledger record — the FULL internal audit trail. No raw
  *  content, no secrets. Surfaced in the MCP payload only behind `detail:"full"`. */
 export interface LedgerEntry {
@@ -141,6 +154,8 @@ export interface LedgerEntry {
   status: ActionStatus;
   reason: string;
   summary: string;
+  /** Present IFF status==="executed" (a staged write). See ExecutionRecord. */
+  execution?: ExecutionRecord;
 }
 
 /** Compact action for the default MCP payload. Carries NO evidence/inference/
@@ -155,4 +170,6 @@ export interface CompactAction {
   status: ActionStatus;
   reason: string;
   summary: string;
+  /** Present IFF status==="executed" (a staged write). See ExecutionRecord. */
+  execution?: ExecutionRecord;
 }

@@ -28,6 +28,7 @@ import { getNeuronVectors } from "./embeddings.js";
 import { analyzeGaps } from "./gap-analysis.js";
 import { dreamScan, formatMarkdown } from "./dream-scan.js";
 import { reflect, formatReflectMarkdown, REFLECT_DEFAULTS } from "./reflect.js";
+import { validateStagingRoot } from "./staging-paths.js";
 
 const VERSION = "0.1.0";
 
@@ -50,6 +51,24 @@ const neuronsDir: string = resolvedDir;
 ensureNeuronsDir(neuronsDir);
 
 console.error(`[factory-neurons] v${VERSION} — neurons at: ${neuronsDir}`);
+
+// CP3 (opt-in, deployment-level gate): the reflect_neurons executor activates ONLY
+// when FACTORY_STAGING_DIR is set. It then materializes policy-"executed" actions
+// as governed artifacts under that root ONLY — never the live corpus, never GitHub.
+// Validated here at boot and fail-closed: a staging dir overlapping the corpus (in
+// EITHER direction, symlinks resolved) is refused and the runtime stays inert (CP2).
+// No env ⇒ no execution layer; the tool's public surface is unchanged.
+let stagingRoot: string | undefined;
+const rawStagingDir = process.env.FACTORY_STAGING_DIR;
+if (rawStagingDir) {
+  const v = validateStagingRoot(rawStagingDir, neuronsDir);
+  if (v.ok && v.root) {
+    stagingRoot = v.root;
+    console.error(`[factory-neurons] CP3 executor ARMED — staging root: ${stagingRoot}`);
+  } else {
+    console.error(`[factory-neurons] CP3 executor DISABLED — refusing FACTORY_STAGING_DIR: ${v.reason}`);
+  }
+}
 
 // ─── Server Setup ────────────────────────────────────────────
 
@@ -459,6 +478,8 @@ server.tool(
         maxItems: max_items ?? REFLECT_DEFAULTS.maxItems,
         detail: detail ?? REFLECT_DEFAULTS.detail,
         reflection: { mirrorThreshold: mirror_threshold ?? 0.97 },
+        // CP3: undefined unless FACTORY_STAGING_DIR was set AND validated at boot.
+        stagingRoot,
       });
       // Compact JSON (no pretty-print indentation) — payload size matters for an
       // interactive MCP tool; the agent parses JSON either way. Use format=markdown

@@ -11,7 +11,7 @@
  * but NOT used in CP2A — it is reserved for the CP3 executor.
  */
 
-import type { LedgerEntry, PolicyDecision } from "./autonomy-types.js";
+import type { ExecutionRecord, LedgerEntry, PolicyDecision } from "./autonomy-types.js";
 
 export interface LedgerSummary {
   total: number;
@@ -24,8 +24,12 @@ export class ActionLedger {
   private entries: LedgerEntry[] = [];
   private seq = 0;
 
-  /** Append a decision. Returns the recorded entry. Append-only — no mutation. */
-  record(decision: PolicyDecision): LedgerEntry {
+  /**
+   * Append a decision. Returns the recorded entry. Append-only — no mutation.
+   * `execution` is recorded ONLY for staged writes (status==="executed"); the
+   * caller is responsible for the invariant that the two travel together.
+   */
+  record(decision: PolicyDecision, execution?: ExecutionRecord): LedgerEntry {
     const entry: LedgerEntry = {
       seq: this.seq++,
       finding_id: decision.finding.id,
@@ -39,6 +43,7 @@ export class ActionLedger {
       status: decision.status,
       reason: decision.reason,
       summary: decision.summary,
+      ...(execution ? { execution } : {}),
     };
     this.entries.push(entry);
     return entry;

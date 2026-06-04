@@ -12,6 +12,7 @@ import {
 } from "../src/self-reflection";
 import { reflect, REFLECT_DEFAULTS } from "../src/reflect";
 import { resetProjectAliasCache, type Neuron, type NeuronCategory } from "../src/neurons";
+import type { LedgerEntry } from "../src/autonomy-types";
 
 // ── In-memory neuron builder (pure-detector tests, no disk) ──────────────────
 
@@ -288,6 +289,63 @@ describe("reflect — orchestrator over a real fixture", () => {
     const full = reflect(neuronsDir, { ...reportOpts, detail: "full" });
     expect(full.detail).toBe("full");
     expect(full.planned_actions.every((a) => "evidence" in a && "inference" in a)).toBe(true);
+  });
+
+  // ── CP3 executor wiring (staging-only). These exercise the full pipeline
+  //    reflect → policy → executor with a staging root configured. ─────────────
+  const armed = (staging: string) => ({
+    ...reportOpts,
+    mode: "autonomous" as const,
+    dryRun: false,
+    createIssues: true,
+    writeProposedNeurons: true,
+    stagingRoot: staging,
+  });
+
+  it("CP3 (test 7): corpus stays byte-identical even with the executor ACTIVE", () => {
+    const staging = mkdtempSync(join(tmpdir(), "reflect-staging-"));
+    try {
+      const before = snapshot(neuronsDir);
+      const r = reflect(neuronsDir, armed(staging));
+      expect(snapshot(neuronsDir)).toBe(before); // live corpus untouched
+      expect(r.action_summary.executed).toBeGreaterThan(0); // executor actually ran
+      const staged = readdirSync(staging, { recursive: true }) as string[];
+      expect(staged.some((f) => f.includes("proposed-neurons") || f.includes("issues"))).toBe(true);
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
+  });
+
+  it("CP3 (test 8): every executed action carries execution.target='staging'; no other does", () => {
+    const staging = mkdtempSync(join(tmpdir(), "reflect-staging-"));
+    try {
+      const r = reflect(neuronsDir, { ...armed(staging), detail: "full" });
+      const actions = r.planned_actions as LedgerEntry[];
+      const executed = actions.filter((a) => a.status === "executed");
+      expect(executed.length).toBeGreaterThan(0);
+      for (const a of executed) {
+        expect(a.execution?.target).toBe("staging");
+        expect(a.execution?.artifact).toBeTruthy();
+      }
+      for (const a of actions.filter((a) => a.status !== "executed")) {
+        expect(a.execution).toBeUndefined(); // the converse half of the invariant
+      }
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
+  });
+
+  it("CP3 (test 9): a staging root INSIDE the corpus is refused — 0 executed, corpus intact", () => {
+    const before = snapshot(neuronsDir);
+    const r = reflect(neuronsDir, armed(join(neuronsDir, "staging")));
+    expect(r.action_summary.executed).toBe(0); // executor refused at the boundary
+    expect(r.action_summary.blocked).toBeGreaterThan(0); // and recorded as blocked
+    expect(snapshot(neuronsDir)).toBe(before); // nothing created inside the corpus
+  });
+
+  it("CP3: with flags on but NO staging root, the CP2 safety net still stands (0 executed)", () => {
+    const r = reflect(neuronsDir, { ...reportOpts, mode: "autonomous", dryRun: false, createIssues: true, writeProposedNeurons: true });
+    expect(r.action_summary.executed).toBe(0);
   });
 });
 
