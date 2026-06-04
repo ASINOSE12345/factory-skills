@@ -42,7 +42,7 @@ function idOf(n: Neuron): string {
   return n.filename.replace(".md", "");
 }
 
-function daysBetween(a: Date, b: Date): number {
+export function daysBetween(a: Date, b: Date): number {
   return Math.floor((a.getTime() - b.getTime()) / 86_400_000);
 }
 
@@ -64,7 +64,7 @@ function toValidDate(v: unknown): Date | null {
  * Age of a neuron's KNOWLEDGE (not its file): created → date → file mtime.
  * mtime is a poor proxy (a bulk re-sync resets it), so it is only the last resort.
  */
-function knowledgeDate(n: Neuron): { date: Date; source: "created" | "date" | "modified" } {
+export function knowledgeDate(n: Neuron): { date: Date; source: "created" | "date" | "modified" } {
   const c = toValidDate(n.frontmatter.created);
   if (c) return { date: c, source: "created" };
   const d = toValidDate(n.frontmatter.date);

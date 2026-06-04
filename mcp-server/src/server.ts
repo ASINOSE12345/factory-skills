@@ -27,6 +27,7 @@ import {
 import { getNeuronVectors } from "./embeddings.js";
 import { analyzeGaps } from "./gap-analysis.js";
 import { dreamScan, formatMarkdown } from "./dream-scan.js";
+import { reflect, formatReflectMarkdown, REFLECT_DEFAULTS } from "./reflect.js";
 
 const VERSION = "0.1.0";
 
@@ -417,6 +418,56 @@ server.tool(
       });
     } catch (e) {
       return neuronError("LIST_FAILED", String(e));
+    }
+  }
+);
+
+/**
+ * TOOL: reflect_neurons
+ * Self-reflection over the WHOLE brain. Cognition (detectors → findings) is
+ * separated from action (planner → autonomy policy → ledger). Read-only by
+ * default: proposes, never writes. Autonomy (create_*) is gated by mode +
+ * explicit flags + !dry_run, and in CP2A there is no execution layer, so even
+ * then nothing is written — the policy decisions are returned for audit.
+ */
+server.tool(
+  "reflect_neurons",
+  "Self-reflection over the WHOLE neuron brain (read-only by default): mirror clusters, citation-graph " +
+  "integrity, contradiction candidates, self-knowledge (recurring errors without a preventive pattern), " +
+  "and dogma candidates. Separates cognition (detectors→findings, with evidence/inference/recommendation) " +
+  "from action (planner→policy→ledger). Returns findings AND planned_actions with their policy status. " +
+  "Defaults mode=report + dry_run=true → proposes, never writes. Deterministic, no LLM.",
+  {
+    mode: z.enum(["report", "autonomous"]).optional().default("report").describe("report = propose only; autonomous = create_* become eligible (still gated by flags + dry_run)"),
+    dry_run: z.boolean().optional().default(true).describe("When true (default) no write/issue is performed even if otherwise eligible"),
+    create_issues: z.boolean().optional().default(false).describe("Explicit gate for create_issue (needs autonomous + !dry_run)"),
+    write_proposed_neurons: z.boolean().optional().default(false).describe("Explicit gate for create_proposed_neuron (needs autonomous + !dry_run)"),
+    max_actions: z.number().int().min(1).max(500).optional().default(REFLECT_DEFAULTS.maxActions).describe(`Cap on actions planned over the VISIBLE findings (default ${REFLECT_DEFAULTS.maxActions})`),
+    max_items: z.number().int().min(1).max(200).optional().default(REFLECT_DEFAULTS.maxItems).describe(`Cap on findings shown per dimension; hidden findings do NOT generate actions (default ${REFLECT_DEFAULTS.maxItems})`),
+    detail: z.enum(["compact", "full"]).optional().default(REFLECT_DEFAULTS.detail).describe("compact = lean actions (default, <15KB); full = the entire ledger with evidence/inference/recommendation"),
+    mirror_threshold: z.number().min(0.8).max(1).optional().default(0.97).describe("Cosine threshold for mirror clusters (default 0.97)"),
+    format: z.enum(["json", "markdown"]).optional().default("json").describe("Output format"),
+  },
+  async ({ mode, dry_run, create_issues, write_proposed_neurons, max_actions, max_items, detail, mirror_threshold, format }) => {
+    try {
+      const report = reflect(neuronsDir, {
+        mode: mode ?? "report",
+        dryRun: dry_run ?? true,
+        createIssues: create_issues ?? false,
+        writeProposedNeurons: write_proposed_neurons ?? false,
+        maxActions: max_actions ?? REFLECT_DEFAULTS.maxActions,
+        maxItems: max_items ?? REFLECT_DEFAULTS.maxItems,
+        detail: detail ?? REFLECT_DEFAULTS.detail,
+        reflection: { mirrorThreshold: mirror_threshold ?? 0.97 },
+      });
+      // Compact JSON (no pretty-print indentation) — payload size matters for an
+      // interactive MCP tool; the agent parses JSON either way. Use format=markdown
+      // or detail=full for a human-readable / complete view.
+      return format === "markdown"
+        ? wrapResult({ markdown: formatReflectMarkdown(report) })
+        : { content: [{ type: "text" as const, text: JSON.stringify(report) }] };
+    } catch (e) {
+      return neuronError("REFLECT_FAILED", String(e));
     }
   }
 );
