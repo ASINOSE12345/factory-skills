@@ -15,8 +15,6 @@ import {
   ensureNeuronsDir,
   searchNeurons,
   searchNeuronsScored,
-  createNeuron,
-  updatePatternCounter,
   getStats,
   formatBootstrap,
   listNeurons,
@@ -29,6 +27,7 @@ import { analyzeGaps } from "./gap-analysis.js";
 import { dreamScan, formatMarkdown } from "./dream-scan.js";
 import { reflect, formatReflectMarkdown, REFLECT_DEFAULTS } from "./reflect.js";
 import { validateStagingRoot } from "./staging-paths.js";
+import { guardedCreateNeuron, guardedUpdatePatternCounter, isLiveWriteBlocked } from "./write-guard.js";
 
 const VERSION = "0.1.0";
 
@@ -304,13 +303,15 @@ server.tool(
       if (project) overrides.project = project;
       if (component) overrides.component = component;
 
-      const neuron = createNeuron(
+      const res = guardedCreateNeuron(
         neuronsDir,
         category as NeuronCategory,
         title,
         body,
         overrides
       );
+      if (isLiveWriteBlocked(res)) return wrapResult(res);
+      const neuron = res;
 
       return wrapResult({
         created: true,
@@ -339,7 +340,8 @@ server.tool(
   },
   async ({ pattern_id, action }) => {
     try {
-      const result = updatePatternCounter(neuronsDir, pattern_id, action);
+      const result = guardedUpdatePatternCounter(neuronsDir, pattern_id, action);
+      if (isLiveWriteBlocked(result)) return wrapResult(result);
       return wrapResult({
         pattern_id,
         action,

@@ -117,11 +117,13 @@ The MCP server exposes your neurons as tools any AI agent can call:
 | `think_neurons` | Like `search_neurons`, plus a deterministic, read-only gap report: stale, superseded, near-duplicate, unreliable patterns, project-mix |
 | `dream_scan` | Read-only, corpus-wide health scan (not query-driven): near-duplicates, superseded, stale, unreliable patterns, unknown-scope. Proposals only — no writes, no LLM |
 | `get_neuron` | Read the full content of a specific neuron |
-| `create_neuron` | Create a new neuron (error, decision, pattern, foundation) |
-| `update_pattern_counter` | Record a hit or miss — drives lifecycle gates |
+| `create_neuron` | Create a new neuron (error, decision, pattern, foundation) — **live write, off by default** |
+| `update_pattern_counter` | Record a hit or miss — drives lifecycle gates — **live write, off by default** |
 | `get_bootstrap` | Get recent neurons formatted for session injection |
 | `get_stats` | Aggregate stats: counts per type, domains, total |
 | `list_patterns` | List all patterns with lifecycle status and counters |
+
+> **Live-write gate:** `create_neuron` and `update_pattern_counter` write to the live corpus and are **disabled by default** — they return `LIVE_WRITE_DISABLED` unless `FACTORY_ALLOW_LIVE_WRITES=true` is set (manual/operator-approved maintenance only). All read tools and `reflect_neurons` (staging-only, gated by `FACTORY_STAGING_DIR`) are unaffected.
 
 The MCP server is configured automatically by `init`. To add it manually:
 
