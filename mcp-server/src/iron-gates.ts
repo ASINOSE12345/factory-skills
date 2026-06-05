@@ -20,6 +20,7 @@
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { isVerificationCommand, isPushCommand } from "./verification-matcher.js";
 import { type GateState, loadState, saveState } from "./iron-gates-state.js";
+import { ironGatesOverrideFile } from "./runtime-paths.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -44,7 +45,7 @@ type GateResult = BlockResult | AllowResult;
 
 // ─── Constants ──────────────────────────────────────────────
 
-const OVERRIDE_FILE = "/tmp/iron-gates-override.json";
+// Override file path comes from runtime-paths (single source; default /tmp).
 
 interface Override {
   gate: number;
@@ -59,8 +60,8 @@ interface Override {
  */
 function hasOverride(gateNumber: number, filePath?: string): boolean {
   try {
-    if (!existsSync(OVERRIDE_FILE)) return false;
-    const overrides: Override[] = JSON.parse(readFileSync(OVERRIDE_FILE, "utf-8"));
+    if (!existsSync(ironGatesOverrideFile())) return false;
+    const overrides: Override[] = JSON.parse(readFileSync(ironGatesOverrideFile(), "utf-8"));
     const now = new Date();
     return overrides.some(o =>
       o.gate === gateNumber &&

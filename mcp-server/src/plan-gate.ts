@@ -21,6 +21,7 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, basename, extname } from "node:path";
 import { resolveNeuronsDir, searchNeuronsSync, listNeurons, toBreadcrumb } from "./neurons.js";
+import { planGateStateFile, planGateMetricsFile } from "./runtime-paths.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -47,8 +48,7 @@ interface HookOutput {
 
 // ─── State tracking ─────────────────────────────────────────
 
-const STATE_FILE = "/tmp/plan-gate-state.json";
-const METRICS_FILE = "/tmp/plan-gate-metrics.json";
+// State/metrics file paths come from runtime-paths (single source; default /tmp).
 
 interface GateState {
   session_id: string;
@@ -58,8 +58,8 @@ interface GateState {
 
 function loadState(sessionId: string): GateState {
   try {
-    if (existsSync(STATE_FILE)) {
-      const state = JSON.parse(readFileSync(STATE_FILE, "utf-8")) as GateState;
+    if (existsSync(planGateStateFile())) {
+      const state = JSON.parse(readFileSync(planGateStateFile(), "utf-8")) as GateState;
       if (state.session_id === sessionId) return state;
     }
   } catch { /* fresh state */ }
@@ -68,17 +68,17 @@ function loadState(sessionId: string): GateState {
 
 function saveState(state: GateState): void {
   try {
-    writeFileSync(STATE_FILE, JSON.stringify(state), "utf-8");
+    writeFileSync(planGateStateFile(), JSON.stringify(state), "utf-8");
   } catch { /* non-critical */ }
 }
 
 function trackMetric(key: string): void {
   try {
-    const metrics = existsSync(METRICS_FILE)
-      ? JSON.parse(readFileSync(METRICS_FILE, "utf-8"))
+    const metrics = existsSync(planGateMetricsFile())
+      ? JSON.parse(readFileSync(planGateMetricsFile(), "utf-8"))
       : { hits_useful: 0, noise: 0, total_invocations: 0, skipped: 0, since: new Date().toISOString().split("T")[0] };
     metrics[key] = (metrics[key] ?? 0) + 1;
-    writeFileSync(METRICS_FILE, JSON.stringify(metrics, null, 2), "utf-8");
+    writeFileSync(planGateMetricsFile(), JSON.stringify(metrics, null, 2), "utf-8");
   } catch { /* non-critical */ }
 }
 
