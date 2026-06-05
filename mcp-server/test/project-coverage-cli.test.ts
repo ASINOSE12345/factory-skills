@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, beforeAll } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { runProjectCoverage, renderMarkdown, discoverRepos, type ProjectCoverageReport } from "../src/project-coverage-cli";
+import { execSync, spawnSync } from "node:child_process";
+import { runProjectCoverage, renderMarkdown, discoverRepos, parseArgs, type ProjectCoverageReport } from "../src/project-coverage-cli";
 import { resetProjectAliasCache } from "../src/neurons";
 
 const roots: string[] = [];
@@ -310,5 +311,84 @@ describe("discoverRepos — detection primitives", () => {
     const root = mkdtempSync(join(tmpdir(), "cov-cli-empty-"));
     roots.push(root);
     expect(() => runProjectCoverage({ factoryRoot: root })).toThrow(/neurons dir not found/);
+  });
+});
+
+describe("project-coverage — strict CLI parsing (no silent fallback)", () => {
+  it("parses valid args (json default, markdown→md, integer depth)", () => {
+    expect(parseArgs(["--factory-root", "/x", "--format", "md"])).toMatchObject({ factoryRoot: "/x", format: "md" });
+    expect(parseArgs(["--factory-root", "/x", "--format", "markdown"]).format).toBe("md");
+    expect(parseArgs(["--factory-root", "/x", "--repo-max-depth", "2"]).repoMaxDepth).toBe(2);
+    expect(parseArgs(["--factory-root", "/x"]).format).toBe("json");
+  });
+
+  it("rejects an unknown --format value instead of falling back to json", () => {
+    expect(() => parseArgs(["--factory-root", "/x", "--format", "yaml"])).toThrow(/--format must be one of/);
+  });
+
+  it("rejects a non-positive-integer --repo-max-depth", () => {
+    expect(() => parseArgs(["--factory-root", "/x", "--repo-max-depth", "1.5"])).toThrow(/positive integer/);
+    expect(() => parseArgs(["--factory-root", "/x", "--repo-max-depth", "0"])).toThrow(/positive integer/);
+    expect(() => parseArgs(["--factory-root", "/x", "--repo-max-depth", "abc"])).toThrow(/positive integer/);
+  });
+
+  it("rejects a missing value after a flag", () => {
+    expect(() => parseArgs(["--factory-root"])).toThrow(/missing value for --factory-root/);
+    expect(() => parseArgs(["--factory-root", "--format", "json"])).toThrow(/missing value for --factory-root/);
+  });
+
+  it("rejects an unknown argument", () => {
+    expect(() => parseArgs(["--factory-root", "/x", "--bogus"])).toThrow(/unknown argument/);
+  });
+});
+
+describe("project-coverage — CLI contract (subprocess on dist)", () => {
+  const DIST = resolve("dist/project-coverage-cli.js");
+
+  beforeAll(() => {
+    if (!existsSync(DIST)) execSync("npm run build", { cwd: process.cwd(), stdio: "ignore" });
+  }, 60000);
+
+  it("`node dist/...` --format json writes PARSEABLE JSON to stdout (banner-free); progress to stderr", () => {
+    const root = fullFixture();
+    const res = spawnSync("node", [DIST, "--factory-root", root, "--format", "json"], { encoding: "utf8" });
+    expect(res.status).toBe(0);
+    // Regression guard for the npm-banner blocker: stdout MUST be pure JSON.
+    expect(res.stdout.trimStart().startsWith("{")).toBe(true);
+    const parsed = JSON.parse(res.stdout) as ProjectCoverageReport; // throws → fails if stdout is contaminated
+    expect(parsed.summary.repos_total).toBeGreaterThan(0);
+    expect(res.stderr).toMatch(/\[project-coverage\]/); // progress on stderr
+    expect(res.stdout).not.toMatch(/\[project-coverage\]/); // never on stdout
+  });
+
+  it("`node dist/...` --format md writes Markdown to stdout", () => {
+    const root = fullFixture();
+    const res = spawnSync("node", [DIST, "--factory-root", root, "--format", "md"], { encoding: "utf8" });
+    expect(res.status).toBe(0);
+    expect(res.stdout.trimStart().startsWith("# Project Coverage Audit")).toBe(true);
+  });
+
+  it("`npm --silent run project-coverage` keeps stdout JSON-clean (documented npm form)", () => {
+    const root = fullFixture();
+    const res = spawnSync("npm", ["--silent", "run", "project-coverage", "--", "--factory-root", root, "--format", "json"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    expect(res.status).toBe(0);
+    expect(() => JSON.parse(res.stdout)).not.toThrow();
+  });
+
+  it("exits 1 on an invalid --format (no silent fallback)", () => {
+    const root = fullFixture();
+    const res = spawnSync("node", [DIST, "--factory-root", root, "--format", "yaml"], { encoding: "utf8" });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/--format must be one of/);
+  });
+
+  it("exits 1 on a non-integer --repo-max-depth", () => {
+    const root = fullFixture();
+    const res = spawnSync("node", [DIST, "--factory-root", root, "--repo-max-depth", "1.5"], { encoding: "utf8" });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/positive integer/);
   });
 });

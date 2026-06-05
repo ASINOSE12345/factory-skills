@@ -798,34 +798,75 @@ export function renderMarkdown(r: ProjectCoverageReport): string {
 
 // ── CLI wrapper ─────────────────────────────────────────────────────────────
 
-interface CliOptions extends ProjectCoverageOptions {
+export interface CliOptions extends ProjectCoverageOptions {
   format: "json" | "md";
+  help?: boolean;
 }
 
-function parseArgs(argv: string[]): CliOptions {
+const USAGE = `usage:
+  node dist/project-coverage-cli.js --factory-root <dir> [--neurons-dir <dir>] [--repo-max-depth N] [--format json|md]
+  npm --silent run project-coverage -- --factory-root <dir> --format json
+
+The JSON/Markdown report is written to STDOUT; progress and errors go to STDERR.
+For machine-readable output use 'node dist/...' or 'npm --silent run' — a plain
+'npm run' prepends its own banner to STDOUT and would corrupt JSON piping.`;
+
+/**
+ * Strict argument parser — NO silent fallbacks. An unknown flag, a missing value,
+ * a bad --format, or a non-positive-integer --repo-max-depth each throw an Error
+ * with a clear message (the CLI turns that into exit 1).
+ */
+export function parseArgs(argv: string[]): CliOptions {
   const o: CliOptions = { factoryRoot: "", format: "json" };
+  const need = (i: number, flag: string): string => {
+    const v = argv[i];
+    if (v === undefined || v.startsWith("--")) throw new Error(`missing value for ${flag}`);
+    return v;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--factory-root") o.factoryRoot = argv[++i] ?? "";
-    else if (a === "--neurons-dir") o.neuronsDir = argv[++i] ?? "";
-    else if (a === "--repo-max-depth") o.repoMaxDepth = Number(argv[++i] ?? "3");
-    else if (a === "--format") {
-      const f = (argv[++i] ?? "json").toLowerCase();
-      o.format = f === "md" || f === "markdown" ? "md" : "json";
+    if (a === "--factory-root") o.factoryRoot = need(++i, a);
+    else if (a === "--neurons-dir") o.neuronsDir = need(++i, a);
+    else if (a === "--repo-max-depth") {
+      const raw = need(++i, a);
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1) throw new Error(`--repo-max-depth must be a positive integer (got "${raw}")`);
+      o.repoMaxDepth = n;
+    } else if (a === "--format") {
+      const raw = need(++i, a).toLowerCase();
+      if (raw !== "json" && raw !== "md" && raw !== "markdown") {
+        throw new Error(`--format must be one of json|md|markdown (got "${raw}")`);
+      }
+      o.format = raw === "markdown" ? "md" : (raw as "json" | "md");
+    } else if (a === "--help" || a === "-h") {
+      o.help = true;
+    } else {
+      throw new Error(`unknown argument: ${a}`);
     }
   }
   return o;
 }
 
 function main(): void {
-  const opts = parseArgs(process.argv.slice(2));
-  if (!opts.factoryRoot) {
-    console.error(`usage: project-coverage --factory-root <dir> [--neurons-dir <dir>] [--repo-max-depth N] [--format json|md]`);
+  let opts: CliOptions;
+  try {
+    opts = parseArgs(process.argv.slice(2));
+  } catch (e) {
+    console.error(`[project-coverage] ${(e as Error).message}`);
+    console.error(USAGE);
     process.exit(1);
+    return;
   }
-  if (opts.repoMaxDepth !== undefined && (!Number.isFinite(opts.repoMaxDepth) || opts.repoMaxDepth < 1)) {
-    console.error(`[project-coverage] --repo-max-depth must be a positive integer`);
+  if (opts.help) {
+    console.error(USAGE);
+    process.exit(0);
+    return;
+  }
+  if (!opts.factoryRoot) {
+    console.error(`[project-coverage] --factory-root is required`);
+    console.error(USAGE);
     process.exit(1);
+    return;
   }
   let report: ProjectCoverageReport;
   try {
@@ -835,7 +876,7 @@ function main(): void {
     process.exit(1);
     return;
   }
-  // Report goes to STDOUT; progress/logs go to STDERR (keeps stdout machine-clean).
+  // Report → STDOUT; progress/logs → STDERR (keeps STDOUT machine-clean).
   console.error(
     `[project-coverage] repos=${report.summary.repos_total} covered=${report.summary.covered_direct} ` +
       `ambiguous=${report.summary.ambiguous_candidates} uncovered=${report.summary.uncovered} ` +
