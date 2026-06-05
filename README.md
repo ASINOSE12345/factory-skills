@@ -232,6 +232,14 @@ mkdir -p neurons/{errors,decisions,patterns,foundations}
 
 ---
 
+## Architecture docs
+
+Architecture decisions live in [`docs/`](docs/README.md). The first ADR defines the long-term relationship between Factory Memory, Factory Skills, and FactoryOS:
+
+- [`ADR-0001: Factory Knowledge Architecture`](docs/adr/ADR-0001-factory-knowledge-architecture.md)
+
+The short version: `factory-skills` is the cognitive toolkit over Factory Memory. It can be consumed by FactoryOS and by other agents/tools, but it is not itself FactoryOS.
+
 ## Community
 
 factory-skills has an optional community feedback loop. Your neurons stay private — you choose what to share.
