@@ -418,35 +418,57 @@ describe("project-coverage — registry projection (inert, read-only)", () => {
     expect(runProjectCoverage({ factoryRoot: fullFixture() }).registry).toBeNull();
   });
 
-  it("resolves multi-repo ambiguity and applies per-repo statuses via the registry", () => {
+  it("does NOT recompute summary — covered_direct stays the baseline direct-match value", () => {
     const base = runProjectCoverage({ factoryRoot: fullFixture() });
-    expect(base.summary.ambiguous_candidates).toBe(2); // beta + beta-v2 (baseline heuristic)
-
-    const reg = loadRegistry(writeRegistryFile(FULL_REGISTRY));
-    const proj = applyRegistryProjection(base, reg);
-
-    expect(proj.summary.ambiguous_candidates).toBe(0); // registry attributes the repos
-    expect(proj.coverage.ambiguous).toEqual([]);
-    expect(proj.summary.covered_direct).toBe(2); // alpha, beta
-    expect(proj.summary.archived).toBe(1); // beta-v2
-    expect(proj.summary.external).toBe(1); // gamma
-    expect(proj.summary.global_only).toBe(1); // factory-tools
-    expect(proj.summary.registry_bound).toBe(5);
-
-    expect(proj.repos.find((r) => r.repo_id === "beta")!.classification).toBe("covered");
-    expect(proj.repos.find((r) => r.repo_id === "beta-v2")!.registry_status).toBe("archived");
-    expect(proj.repos.find((r) => r.repo_id === "gamma")!.registry_status).toBe("external");
-    expect(proj.repos.find((r) => r.repo_id === "factory-tools")!.global_only).toBe(true);
-    expect(proj.registry?.loaded).toBe(true);
-    expect(proj.registry?.repos_unbound).toEqual([]);
+    const proj = applyRegistryProjection(base, loadRegistry(writeRegistryFile(FULL_REGISTRY)));
+    // The whole point of the microfix: summary + coverage are the BASELINE values,
+    // not recomputed by the registry. covered_direct never means "registry-bound".
+    expect(proj.summary).toEqual(base.summary);
+    expect(proj.coverage).toEqual(base.coverage);
+    expect(proj.summary.ambiguous_candidates).toBe(2); // beta + beta-v2 still baseline-ambiguous
   });
 
-  it("keeps the heuristic classification for repos absent from the registry", () => {
+  it("reports the projection under registry.* with an honest (weaker) name", () => {
+    const proj = applyRegistryProjection(runProjectCoverage({ factoryRoot: fullFixture() }), loadRegistry(writeRegistryFile(FULL_REGISTRY)));
+    const rg = proj.registry!;
+    expect(rg.loaded).toBe(true);
+    expect(rg.repos_bound).toBe(5);
+    expect(rg.repos_unbound).toEqual([]);
+    expect(rg.ambiguous_after).toBe(0);
+    expect(rg.covered_project_specific.slice().sort()).toEqual(["alpha", "beta"]);
+    expect(rg.archived).toEqual(["beta-v2"]);
+    expect(rg.external).toEqual(["gamma"]);
+    expect(rg.global_only).toEqual(["factory-tools"]);
+  });
+
+  it("archived/external/global repos are NOT counted as covered_project_specific", () => {
+    const rg = applyRegistryProjection(runProjectCoverage({ factoryRoot: fullFixture() }), loadRegistry(writeRegistryFile(FULL_REGISTRY))).registry!;
+    expect(rg.covered_project_specific).not.toContain("beta-v2"); // archived
+    expect(rg.covered_project_specific).not.toContain("gamma"); // external
+    expect(rg.covered_project_specific).not.toContain("factory-tools"); // global_only
+  });
+
+  it("annotates each repo with a registry view WITHOUT changing its baseline classification", () => {
+    const base = runProjectCoverage({ factoryRoot: fullFixture() });
+    const proj = applyRegistryProjection(base, loadRegistry(writeRegistryFile(FULL_REGISTRY)));
+    const beta = proj.repos.find((r) => r.repo_id === "beta")!;
+    const betaBase = base.repos.find((r) => r.repo_id === "beta")!;
+    expect(beta.registry_classification).toBe("covered_project_specific");
+    expect(beta.classification).toBe(betaBase.classification); // baseline untouched (ambiguous)
+    expect(proj.repos.find((r) => r.repo_id === "beta-v2")!.registry_classification).toBe("archived");
+    expect(proj.repos.find((r) => r.repo_id === "gamma")!.registry_classification).toBe("external");
+    expect(proj.repos.find((r) => r.repo_id === "factory-tools")!.registry_classification).toBe("global_only");
+  });
+
+  it("repos absent from the registry are 'unbound' and keep their heuristic classification", () => {
     const reg = loadRegistry(writeRegistryFile([{ project_id: "alpha", status: "active", repos: [{ repo_id: "alpha" }] }]));
-    const proj = applyRegistryProjection(runProjectCoverage({ factoryRoot: fullFixture() }), reg);
-    expect(proj.coverage.covered).toContain("alpha");
-    expect(proj.coverage.ambiguous).toEqual(expect.arrayContaining(["beta", "beta-v2"])); // unbound → heuristic
-    expect(proj.registry?.repos_unbound).toEqual(expect.arrayContaining(["beta", "beta-v2", "gamma", "factory-tools"]));
+    const base = runProjectCoverage({ factoryRoot: fullFixture() });
+    const proj = applyRegistryProjection(base, reg);
+    expect(proj.registry!.covered_project_specific).toEqual(["alpha"]);
+    expect(proj.registry!.repos_unbound).toEqual(expect.arrayContaining(["beta", "beta-v2", "gamma", "factory-tools"]));
+    expect(proj.repos.find((r) => r.repo_id === "beta")!.registry_classification).toBe("unbound");
+    expect(proj.coverage).toEqual(base.coverage); // baseline coverage unchanged
+    expect(proj.registry!.ambiguous_after).toBeGreaterThan(0); // beta/beta-v2 unresolved by partial registry
   });
 
   it("surfaces registry alias collisions without throwing", () => {
@@ -455,7 +477,7 @@ describe("project-coverage — registry projection (inert, read-only)", () => {
       { project_id: "beta", status: "active", aliases: ["shared"], repos: [{ repo_id: "beta" }] },
     ]));
     const proj = applyRegistryProjection(runProjectCoverage({ factoryRoot: fullFixture() }), reg);
-    expect(proj.registry?.alias_collisions.some((c) => c.alias === "shared")).toBe(true);
+    expect(proj.registry!.alias_collisions.some((c) => c.alias === "shared")).toBe(true);
   });
 });
 
@@ -465,15 +487,17 @@ describe("project-coverage — registry projection (subprocess on dist)", () => 
     if (!existsSync(DIST)) execSync("npm run build", { cwd: process.cwd(), stdio: "ignore" });
   }, 60000);
 
-  it("--registry yields parseable JSON with registry.loaded and ambiguous resolved", () => {
+  it("--registry: registry block carries the projection; summary stays baseline (direct)", () => {
     const root = fullFixture();
     const regPath = writeRegistryFile(FULL_REGISTRY);
     const res = spawnSync("node", [DIST, "--factory-root", root, "--registry", regPath, "--format", "json"], { encoding: "utf8" });
     expect(res.status).toBe(0);
     const parsed = JSON.parse(res.stdout) as ProjectCoverageReport;
     expect(parsed.registry?.loaded).toBe(true);
-    expect(parsed.summary.ambiguous_candidates).toBe(0);
-    expect(parsed.summary.registry_bound).toBe(5);
+    expect(parsed.registry?.ambiguous_after).toBe(0);
+    expect(parsed.registry?.repos_bound).toBe(5);
+    expect(parsed.registry?.covered_project_specific.length).toBe(2);
+    expect(parsed.summary.ambiguous_candidates).toBe(2); // summary is baseline, NOT recomputed
   });
 
   it("exits 1 on a missing/invalid registry file (no silent fallback)", () => {

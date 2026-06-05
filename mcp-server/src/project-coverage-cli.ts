@@ -108,10 +108,12 @@ export interface RepoEntry {
   siblings: string[];
   candidates: RepoCandidate[];
   evidence: string[];
-  /** Set only in registry-projection mode (`--registry`). */
+  /** Set only in registry-projection mode (`--registry`). `classification` above
+   *  stays the BASELINE (direct/heuristic) value; this is the registry's view. */
   registry_project_id?: string;
   registry_role?: string;
   registry_status?: ProjectStatus;
+  registry_classification?: RegistryClassification;
 }
 
 export interface AnomalyEntry {
@@ -154,6 +156,9 @@ export interface ProjectCoverageReport {
     uncovered: string[];
     ambiguous: string[];
   };
+  // summary ALWAYS uses baseline semantics: `covered_direct` means a DIRECT
+  // token/canonical match — it is NOT recomputed by the registry. Registry
+  // projection lives entirely in the `registry` block below.
   summary: {
     repos_total: number;
     covered_direct: number;
@@ -162,10 +167,6 @@ export interface ProjectCoverageReport {
     global_only: number;
     anomalies: number;
     projects_with_neurons_no_repo: number;
-    /** Registry-projection only (0 in baseline mode). */
-    archived: number;
-    external: number;
-    registry_bound: number;
   };
   neurons: {
     total: number;
@@ -190,18 +191,42 @@ export interface ProjectCoverageReport {
   registry: RegistryProjection | null;
 }
 
+/**
+ * Registry projection metrics. These are DELIBERATELY named to NOT be read as a
+ * "direct match": `covered_project_specific` means "repo is bound by the registry
+ * to a project that has project-specific neurons" — which is weaker than the
+ * baseline `summary.covered_direct` (a direct token/canonical match). e.g. a
+ * `web` component repo is covered_project_specific because the registry attributes
+ * it to its product, not because neurons named that repo directly.
+ */
 export interface RegistryProjection {
   loaded: true;
   path: string;
   projects: number;
   repos_bound: number;
   repos_unbound: string[];
+  /** Active repos bound to a non-global project that has project-specific neurons. */
+  covered_project_specific: string[];
+  /** Active repos bound to a project flagged is_global (global knowledge only). */
+  global_only: string[];
+  /** Active repos bound to a project with zero project-specific neurons. */
+  uncovered: string[];
   archived: string[];
   external: string[];
+  /** Repos still ambiguous after the registry (i.e. unbound + heuristically ambiguous). */
+  ambiguous_after: number;
   alias_collisions: Array<{ alias: string; project_ids: string[] }>;
   repo_collisions: Array<{ repo_id: string; project_ids: string[] }>;
   project_neurons: Record<string, number>;
 }
+
+export type RegistryClassification =
+  | "covered_project_specific"
+  | "global_only"
+  | "uncovered"
+  | "archived"
+  | "external"
+  | "unbound";
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
@@ -697,9 +722,6 @@ export function runProjectCoverage(opts: ProjectCoverageOptions): ProjectCoverag
       global_only: globalOnlyList.length,
       anomalies: anomalies.length,
       projects_with_neurons_no_repo: projectsNoRepo,
-      archived: 0,
-      external: 0,
-      registry_bound: 0,
     },
     neurons: {
       total: neurons.length,
@@ -734,76 +756,53 @@ export function applyRegistryProjection(base: ProjectCoverageReport, reg: Loaded
     if (pid) projNeurons.set(pid, (projNeurons.get(pid) ?? 0) + dp.neuron_count);
   }
 
+  // Annotate each repo with the registry's view. IMPORTANT: the baseline
+  // `classification`/`global_only` fields are LEFT UNTOUCHED — only the
+  // `registry_*` fields are added — so `summary` keeps its direct-match meaning.
   const repos: RepoEntry[] = base.repos.map((r) => {
     const b = reg.repoToProject.get(normalizeToken(r.repo_id));
-    if (!b) return { ...r }; // unbound → keep baseline classification
+    if (!b) return { ...r, registry_classification: "unbound" as RegistryClassification };
     const proj = reg.projectById.get(b.project_id);
     const n = projNeurons.get(b.project_id) ?? 0;
-    let classification: RepoClassification = "uncovered";
-    let global_only = false;
-    const evidence: string[] = [];
-    if (b.repo_status === "archived") {
-      evidence.push(`registry: repo '${r.repo_id}' is archived under project '${b.project_id}'`);
-    } else if (b.repo_status === "external") {
-      evidence.push(`registry: repo '${r.repo_id}' is external under project '${b.project_id}'`);
-    } else if (proj?.is_global) {
-      global_only = true;
-      evidence.push(`registry: repo '${r.repo_id}' → global project '${b.project_id}' (covered by global knowledge, not project-specific)`);
-    } else if (n > 0) {
-      classification = "covered";
-      evidence.push(`registry: repo '${r.repo_id}' → project '${b.project_id}' (${n} neurons${b.role ? `, role=${b.role}` : ""})`);
-    } else {
-      evidence.push(`registry: repo '${r.repo_id}' → project '${b.project_id}' but 0 project-specific neurons`);
-    }
+    let rc: RegistryClassification;
+    if (b.repo_status === "archived") rc = "archived";
+    else if (b.repo_status === "external") rc = "external";
+    else if (proj?.is_global) rc = "global_only";
+    else if (n > 0) rc = "covered_project_specific";
+    else rc = "uncovered";
     return {
       ...r,
-      classification,
-      global_only,
       registry_project_id: b.project_id,
       registry_role: b.role,
       registry_status: b.repo_status,
-      evidence,
+      registry_classification: rc,
     };
   });
 
-  const isArchived = (r: RepoEntry): boolean => r.registry_status === "archived";
-  const isExternal = (r: RepoEntry): boolean => r.registry_status === "external";
-  const covered = repos.filter((r) => r.classification === "covered");
-  const ambiguous = repos.filter((r) => r.classification === "ambiguous");
-  const globalOnly = repos.filter((r) => r.global_only);
-  const archived = repos.filter(isArchived);
-  const external = repos.filter(isExternal);
-  const uncovered = repos.filter(
-    (r) => r.classification === "uncovered" && !r.global_only && !isArchived(r) && !isExternal(r),
-  );
+  const ids = (rc: RegistryClassification): string[] =>
+    repos.filter((r) => r.registry_classification === rc).map((r) => r.repo_id).sort();
   const bound = repos.filter((r) => r.registry_project_id);
+  const unbound = repos.filter((r) => !r.registry_project_id);
+  // "ambiguous_after" = what the registry did NOT resolve and that is still
+  // ambiguous by the baseline heuristic.
+  const ambiguousAfter = unbound.filter((r) => r.classification === "ambiguous").length;
 
   return {
+    // summary + coverage are intentionally the BASELINE values (no registry recompute).
     ...base,
     repos,
-    coverage: {
-      covered: covered.map((r) => r.repo_id),
-      uncovered: uncovered.map((r) => r.repo_id),
-      ambiguous: ambiguous.map((r) => r.repo_id),
-    },
-    summary: {
-      ...base.summary,
-      covered_direct: covered.length,
-      ambiguous_candidates: ambiguous.length,
-      uncovered: uncovered.length,
-      global_only: globalOnly.length,
-      archived: archived.length,
-      external: external.length,
-      registry_bound: bound.length,
-    },
     registry: {
       loaded: true,
       path: reg.path,
       projects: reg.raw.projects.length,
       repos_bound: bound.length,
-      repos_unbound: repos.filter((r) => !r.registry_project_id).map((r) => r.repo_id).sort(),
-      archived: archived.map((r) => r.repo_id).sort(),
-      external: external.map((r) => r.repo_id).sort(),
+      repos_unbound: unbound.map((r) => r.repo_id).sort(),
+      covered_project_specific: ids("covered_project_specific"),
+      global_only: ids("global_only"),
+      uncovered: ids("uncovered"),
+      archived: ids("archived"),
+      external: ids("external"),
+      ambiguous_after: ambiguousAfter,
       alias_collisions: reg.aliasCollisions,
       repo_collisions: reg.repoCollisions,
       project_neurons: Object.fromEntries([...projNeurons.entries()].sort((a, b) => b[1] - a[1])),
@@ -834,7 +833,7 @@ export function renderMarkdown(r: ProjectCoverageReport): string {
   L.push(`- Projects with neurons but no local repo: ${s.projects_with_neurons_no_repo}`);
   L.push(`- _Limit: LOCAL coverage only (repos with .git + local corpus). No GitHub-total claim._`);
   if (r.registry) {
-    L.push(`- Registry projection: **${r.registry.repos_bound}/${s.repos_total}** repos bound · archived: ${s.archived} · external: ${s.external} (inert — live MCP unchanged)`);
+    L.push(`- Registry projection (inert): **${r.registry.repos_bound}/${s.repos_total}** repos bound · covered_project_specific: ${r.registry.covered_project_specific.length} · ambiguous_after: ${r.registry.ambiguous_after} — projected, NOT direct coverage (see Registry Projection)`);
   }
   L.push("");
 
@@ -855,20 +854,27 @@ export function renderMarkdown(r: ProjectCoverageReport): string {
   L.push(`| ambiguous_candidates | ${s.ambiguous_candidates} | ${r.repos.filter((x) => x.classification === "ambiguous").map((x) => x.repo_id).join(", ")} |`);
   L.push(`| uncovered | ${s.uncovered} | ${r.repos.filter((x) => x.classification === "uncovered" && !x.global_only).map((x) => x.repo_id).join(", ")} |`);
   L.push(`| global_only | ${s.global_only} | ${r.repos.filter((x) => x.global_only).map((x) => x.repo_id).join(", ")} |`);
-  if (r.registry) {
-    L.push(`| archived | ${s.archived} | ${r.repos.filter((x) => x.registry_status === "archived").map((x) => x.repo_id).join(", ")} |`);
-    L.push(`| external | ${s.external} | ${r.repos.filter((x) => x.registry_status === "external").map((x) => x.repo_id).join(", ")} |`);
-  }
   L.push("");
 
   if (r.registry) {
-    L.push(`## Registry Projection`);
+    const rg = r.registry;
+    L.push(`## Registry Projection (inert — NOT a direct match)`);
     L.push("");
-    L.push(`Source: \`${r.registry.path}\` · projects: ${r.registry.projects} · repos bound: ${r.registry.repos_bound} · unbound: ${r.registry.repos_unbound.length}`);
-    L.push(`_Inert: this is a what-if projection; the live MCP scope resolution is unchanged (adoption is PR-3C)._`);
-    if (r.registry.repos_unbound.length > 0) L.push(`- Unbound repos (kept heuristic classification): ${r.registry.repos_unbound.join(", ")}`);
-    if (r.registry.alias_collisions.length > 0) L.push(`- ⚠ alias collisions: ${r.registry.alias_collisions.map((c) => `${c.alias}→{${c.project_ids.join("|")}}`).join(", ")}`);
-    if (r.registry.repo_collisions.length > 0) L.push(`- ⚠ repo collisions: ${r.registry.repo_collisions.map((c) => `${c.repo_id}→{${c.project_ids.join("|")}}`).join(", ")}`);
+    L.push(`Source: \`${rg.path}\` · projects: ${rg.projects} · repos bound: ${rg.repos_bound} · unbound: ${rg.repos_unbound.length}`);
+    L.push(`_What-if projection. \`covered_project_specific\` means a repo is **bound by the registry** to a project that has project-specific neurons — this is WEAKER than the baseline \`covered_direct\` (a direct token/canonical match) and must not be read as one. The live MCP scope resolution is unchanged (adoption is PR-3C)._`);
+    L.push("");
+    L.push(`| registry bucket | count | repos |`);
+    L.push(`|---|---|---|`);
+    L.push(`| covered_project_specific | ${rg.covered_project_specific.length} | ${rg.covered_project_specific.join(", ")} |`);
+    L.push(`| global_only | ${rg.global_only.length} | ${rg.global_only.join(", ")} |`);
+    L.push(`| uncovered | ${rg.uncovered.length} | ${rg.uncovered.join(", ")} |`);
+    L.push(`| archived | ${rg.archived.length} | ${rg.archived.join(", ")} |`);
+    L.push(`| external | ${rg.external.length} | ${rg.external.join(", ")} |`);
+    L.push(`| unbound (kept heuristic) | ${rg.repos_unbound.length} | ${rg.repos_unbound.join(", ")} |`);
+    L.push("");
+    L.push(`Ambiguous after registry: **${rg.ambiguous_after}** (baseline ambiguous_candidates: ${s.ambiguous_candidates}; baseline covered_direct: ${s.covered_direct}).`);
+    if (rg.alias_collisions.length > 0) L.push(`- ⚠ alias collisions: ${rg.alias_collisions.map((c) => `${c.alias}→{${c.project_ids.join("|")}}`).join(", ")}`);
+    if (rg.repo_collisions.length > 0) L.push(`- ⚠ repo collisions: ${rg.repo_collisions.map((c) => `${c.repo_id}→{${c.project_ids.join("|")}}`).join(", ")}`);
     L.push("");
   }
 
@@ -1027,10 +1033,19 @@ function main(): void {
   }
   // Report → STDOUT; progress/logs → STDERR (keeps STDOUT machine-clean).
   console.error(
-    `[project-coverage] repos=${report.summary.repos_total} covered=${report.summary.covered_direct} ` +
+    `[project-coverage] baseline(direct): repos=${report.summary.repos_total} covered_direct=${report.summary.covered_direct} ` +
       `ambiguous=${report.summary.ambiguous_candidates} uncovered=${report.summary.uncovered} ` +
       `global_only=${report.summary.global_only} anomalies=${report.summary.anomalies}`,
   );
+  if (report.registry) {
+    console.error(
+      `[project-coverage] registry(projection): bound=${report.registry.repos_bound} ` +
+        `covered_project_specific=${report.registry.covered_project_specific.length} ` +
+        `global_only=${report.registry.global_only.length} archived=${report.registry.archived.length} ` +
+        `external=${report.registry.external.length} ambiguous_after=${report.registry.ambiguous_after} ` +
+        `unbound=${report.registry.repos_unbound.length}`,
+    );
+  }
   process.stdout.write(opts.format === "md" ? renderMarkdown(report) + "\n" : JSON.stringify(report, null, 2) + "\n");
   process.exit(0);
 }
