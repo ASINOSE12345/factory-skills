@@ -13,7 +13,9 @@
     "start": "node dist/server.js",
     "test": "vitest run",
     "dream-scan": "node dist/dream-scan.js",
-    "embeddings": "node dist/embeddings-cli.js"
+    "embeddings": "node dist/embeddings-cli.js",
+    "config:generate": "node scripts/gen-local-config.mjs",
+    "config:validate": "node scripts/validate-local-config.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
