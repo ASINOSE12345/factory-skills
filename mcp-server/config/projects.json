@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "_comment": "Declarative project registry (PR-3B). Authored from observed evidence (git remotes + corpus tokens), conservative: no project is invented without evidence. NOT yet wired into live MCP scope resolution (that is PR-3C); measured today via `project-coverage --registry`. Review/edit by PR.",
+  "projects": [
+    {
+      "project_id": "urbanvistacapital",
+      "status": "active",
+      "aliases": ["uv", "urbanvista"],
+      "repos": [
+        { "repo_id": "UrbanVistaCapital-portal-inmobiliario", "role": "app", "status": "active" },
+        { "repo_id": "UrbanVistaCapital-v1-BACKUP.git", "role": "backup", "status": "archived", "note": "bare mirror of the app repo" }
+      ],
+      "note": "509 corpus neurons; repo dir name does not alias-resolve to the canonical without this entry"
+    },
+    {
+      "project_id": "peoplesynapse",
+      "status": "active",
+      "aliases": ["ps"],
+      "repos": [
+        { "repo_id": "PeopleSynapse", "role": "app", "status": "active", "note": "v2" }
+      ]
+    },
+    {
+      "project_id": "peoplesynapse-v1",
+      "status": "archived",
+      "aliases": ["ps-v1", "peoplesynapsev1"],
+      "repos": [
+        { "repo_id": "PeopleSynapse-v1", "role": "app", "status": "archived" }
+      ],
+      "note": "distinct GitHub repo (ASINOSE12345/PeopleSynapse-v1); superseded by peoplesynapse v2"
+    },
+    {
+      "project_id": "olguisclass",
+      "status": "active",
+      "aliases": ["oc", "olguis"],
+      "repos": [
+        { "repo_id": "Olgui-s_Class", "role": "app", "status": "active" }
+      ]
+    },
+    {
+      "project_id": "factory-os",
+      "status": "active",
+      "aliases": ["factoryos"],
+      "repos": [
+        { "repo_id": "factory-os", "role": "app", "status": "active" },
+        { "repo_id": "factory-os-progress-map", "role": "docs", "status": "active", "note": "second local checkout of the SAME GitHub repo (branch docs/progress-map)" }
+      ]
+    },
+    {
+      "project_id": "jbcodingiot",
+      "status": "active",
+      "aliases": ["jbc"],
+      "repos": [
+        { "repo_id": "jbcodingiot", "role": "core", "status": "active" },
+        { "repo_id": "jbcodingiot-web", "role": "web", "status": "active", "note": "separate GitHub repo; web component of the same product" }
+      ],
+      "note": "modeled as one product with core + web component repos (not interchangeable aliases)"
+    },
+    {
+      "project_id": "softwarefactory",
+      "status": "active",
+      "is_global": true,
+      "aliases": ["sf", "factory"],
+      "repos": [
+        { "repo_id": "factory-skills", "role": "platform", "status": "active", "note": "MCP server + skills (this repo)" },
+        { "repo_id": "jb-software-factory", "role": "governance", "status": "active" },
+        { "repo_id": "jb-coding-software-factory", "role": "control-plane", "status": "active", "note": "no git remote (local-only)" }
+      ],
+      "note": "platform/factory-wide knowledge is global scope; these repos are covered by global neurons, not project-specific ones"
+    }
+  ]
+}
