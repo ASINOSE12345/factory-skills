@@ -42,6 +42,7 @@ import {
   type Neuron,
   type NeuronCategory,
 } from "./neurons.js";
+import { loadRegistry, type LoadedRegistry, type ProjectStatus } from "./registry.js";
 
 // ── Constants / heuristics (documented, never silent) ───────────────────────
 
@@ -107,6 +108,10 @@ export interface RepoEntry {
   siblings: string[];
   candidates: RepoCandidate[];
   evidence: string[];
+  /** Set only in registry-projection mode (`--registry`). */
+  registry_project_id?: string;
+  registry_role?: string;
+  registry_status?: ProjectStatus;
 }
 
 export interface AnomalyEntry {
@@ -157,6 +162,10 @@ export interface ProjectCoverageReport {
     global_only: number;
     anomalies: number;
     projects_with_neurons_no_repo: number;
+    /** Registry-projection only (0 in baseline mode). */
+    archived: number;
+    external: number;
+    registry_bound: number;
   };
   neurons: {
     total: number;
@@ -177,6 +186,21 @@ export interface ProjectCoverageReport {
     collisions: Array<{ alias: string; canonicals: string[]; note: string }>;
   };
   recommendations: Array<{ priority: "high" | "medium" | "low"; kind: string; message: string }>;
+  /** Present only when run with `--registry` (projection mode); null in baseline. */
+  registry: RegistryProjection | null;
+}
+
+export interface RegistryProjection {
+  loaded: true;
+  path: string;
+  projects: number;
+  repos_bound: number;
+  repos_unbound: string[];
+  archived: string[];
+  external: string[];
+  alias_collisions: Array<{ alias: string; project_ids: string[] }>;
+  repo_collisions: Array<{ repo_id: string; project_ids: string[] }>;
+  project_neurons: Record<string, number>;
 }
 
 // ── Small helpers ───────────────────────────────────────────────────────────
@@ -673,6 +697,9 @@ export function runProjectCoverage(opts: ProjectCoverageOptions): ProjectCoverag
       global_only: globalOnlyList.length,
       anomalies: anomalies.length,
       projects_with_neurons_no_repo: projectsNoRepo,
+      archived: 0,
+      external: 0,
+      registry_bound: 0,
     },
     neurons: {
       total: neurons.length,
@@ -687,6 +714,100 @@ export function runProjectCoverage(opts: ProjectCoverageOptions): ProjectCoverag
     references,
     aliases: { source_file: aliasInfo.sourceFile, collisions: aliasInfo.collisions },
     recommendations,
+    registry: null,
+  };
+}
+
+/**
+ * Registry-projection (PURE, read-only). Re-binds each repo to its declared
+ * project via the registry and recomputes coverage — WITHOUT touching the live
+ * MCP scope resolution. This is the "what coverage would be, with the registry"
+ * measurement for PR-3B; live adoption is PR-3C. Repos not present in the
+ * registry keep their baseline (heuristic) classification.
+ */
+export function applyRegistryProjection(base: ProjectCoverageReport, reg: LoadedRegistry): ProjectCoverageReport {
+  // Neuron count per registry project_id (map each canonical via the alias index).
+  const projNeurons = new Map<string, number>();
+  for (const dp of base.detected_projects) {
+    if (dp.neuron_count <= 0) continue;
+    const pid = reg.aliasToProject.get(normalizeToken(dp.canonical));
+    if (pid) projNeurons.set(pid, (projNeurons.get(pid) ?? 0) + dp.neuron_count);
+  }
+
+  const repos: RepoEntry[] = base.repos.map((r) => {
+    const b = reg.repoToProject.get(normalizeToken(r.repo_id));
+    if (!b) return { ...r }; // unbound → keep baseline classification
+    const proj = reg.projectById.get(b.project_id);
+    const n = projNeurons.get(b.project_id) ?? 0;
+    let classification: RepoClassification = "uncovered";
+    let global_only = false;
+    const evidence: string[] = [];
+    if (b.repo_status === "archived") {
+      evidence.push(`registry: repo '${r.repo_id}' is archived under project '${b.project_id}'`);
+    } else if (b.repo_status === "external") {
+      evidence.push(`registry: repo '${r.repo_id}' is external under project '${b.project_id}'`);
+    } else if (proj?.is_global) {
+      global_only = true;
+      evidence.push(`registry: repo '${r.repo_id}' → global project '${b.project_id}' (covered by global knowledge, not project-specific)`);
+    } else if (n > 0) {
+      classification = "covered";
+      evidence.push(`registry: repo '${r.repo_id}' → project '${b.project_id}' (${n} neurons${b.role ? `, role=${b.role}` : ""})`);
+    } else {
+      evidence.push(`registry: repo '${r.repo_id}' → project '${b.project_id}' but 0 project-specific neurons`);
+    }
+    return {
+      ...r,
+      classification,
+      global_only,
+      registry_project_id: b.project_id,
+      registry_role: b.role,
+      registry_status: b.repo_status,
+      evidence,
+    };
+  });
+
+  const isArchived = (r: RepoEntry): boolean => r.registry_status === "archived";
+  const isExternal = (r: RepoEntry): boolean => r.registry_status === "external";
+  const covered = repos.filter((r) => r.classification === "covered");
+  const ambiguous = repos.filter((r) => r.classification === "ambiguous");
+  const globalOnly = repos.filter((r) => r.global_only);
+  const archived = repos.filter(isArchived);
+  const external = repos.filter(isExternal);
+  const uncovered = repos.filter(
+    (r) => r.classification === "uncovered" && !r.global_only && !isArchived(r) && !isExternal(r),
+  );
+  const bound = repos.filter((r) => r.registry_project_id);
+
+  return {
+    ...base,
+    repos,
+    coverage: {
+      covered: covered.map((r) => r.repo_id),
+      uncovered: uncovered.map((r) => r.repo_id),
+      ambiguous: ambiguous.map((r) => r.repo_id),
+    },
+    summary: {
+      ...base.summary,
+      covered_direct: covered.length,
+      ambiguous_candidates: ambiguous.length,
+      uncovered: uncovered.length,
+      global_only: globalOnly.length,
+      archived: archived.length,
+      external: external.length,
+      registry_bound: bound.length,
+    },
+    registry: {
+      loaded: true,
+      path: reg.path,
+      projects: reg.raw.projects.length,
+      repos_bound: bound.length,
+      repos_unbound: repos.filter((r) => !r.registry_project_id).map((r) => r.repo_id).sort(),
+      archived: archived.map((r) => r.repo_id).sort(),
+      external: external.map((r) => r.repo_id).sort(),
+      alias_collisions: reg.aliasCollisions,
+      repo_collisions: reg.repoCollisions,
+      project_neurons: Object.fromEntries([...projNeurons.entries()].sort((a, b) => b[1] - a[1])),
+    },
   };
 }
 
@@ -712,6 +833,9 @@ export function renderMarkdown(r: ProjectCoverageReport): string {
   L.push(`- **covered_direct: ${s.covered_direct}** · **ambiguous_candidates: ${s.ambiguous_candidates}** · **uncovered: ${s.uncovered}** · **global_only: ${s.global_only}**`);
   L.push(`- Projects with neurons but no local repo: ${s.projects_with_neurons_no_repo}`);
   L.push(`- _Limit: LOCAL coverage only (repos with .git + local corpus). No GitHub-total claim._`);
+  if (r.registry) {
+    L.push(`- Registry projection: **${r.registry.repos_bound}/${s.repos_total}** repos bound · archived: ${s.archived} · external: ${s.external} (inert — live MCP unchanged)`);
+  }
   L.push("");
 
   L.push(`## Local Repositories`);
@@ -731,7 +855,22 @@ export function renderMarkdown(r: ProjectCoverageReport): string {
   L.push(`| ambiguous_candidates | ${s.ambiguous_candidates} | ${r.repos.filter((x) => x.classification === "ambiguous").map((x) => x.repo_id).join(", ")} |`);
   L.push(`| uncovered | ${s.uncovered} | ${r.repos.filter((x) => x.classification === "uncovered" && !x.global_only).map((x) => x.repo_id).join(", ")} |`);
   L.push(`| global_only | ${s.global_only} | ${r.repos.filter((x) => x.global_only).map((x) => x.repo_id).join(", ")} |`);
+  if (r.registry) {
+    L.push(`| archived | ${s.archived} | ${r.repos.filter((x) => x.registry_status === "archived").map((x) => x.repo_id).join(", ")} |`);
+    L.push(`| external | ${s.external} | ${r.repos.filter((x) => x.registry_status === "external").map((x) => x.repo_id).join(", ")} |`);
+  }
   L.push("");
+
+  if (r.registry) {
+    L.push(`## Registry Projection`);
+    L.push("");
+    L.push(`Source: \`${r.registry.path}\` · projects: ${r.registry.projects} · repos bound: ${r.registry.repos_bound} · unbound: ${r.registry.repos_unbound.length}`);
+    L.push(`_Inert: this is a what-if projection; the live MCP scope resolution is unchanged (adoption is PR-3C)._`);
+    if (r.registry.repos_unbound.length > 0) L.push(`- Unbound repos (kept heuristic classification): ${r.registry.repos_unbound.join(", ")}`);
+    if (r.registry.alias_collisions.length > 0) L.push(`- ⚠ alias collisions: ${r.registry.alias_collisions.map((c) => `${c.alias}→{${c.project_ids.join("|")}}`).join(", ")}`);
+    if (r.registry.repo_collisions.length > 0) L.push(`- ⚠ repo collisions: ${r.registry.repo_collisions.map((c) => `${c.repo_id}→{${c.project_ids.join("|")}}`).join(", ")}`);
+    L.push("");
+  }
 
   L.push(`## Unknown-scope Neurons (by category)`);
   L.push("");
@@ -801,15 +940,19 @@ export function renderMarkdown(r: ProjectCoverageReport): string {
 export interface CliOptions extends ProjectCoverageOptions {
   format: "json" | "md";
   help?: boolean;
+  /** Optional path to a projects.json registry → inert projection mode. */
+  registryPath?: string;
 }
 
 const USAGE = `usage:
-  node dist/project-coverage-cli.js --factory-root <dir> [--neurons-dir <dir>] [--repo-max-depth N] [--format json|md]
+  node dist/project-coverage-cli.js --factory-root <dir> [--neurons-dir <dir>] [--repo-max-depth N] [--registry <projects.json>] [--format json|md]
   npm --silent run project-coverage -- --factory-root <dir> --format json
 
-The JSON/Markdown report is written to STDOUT; progress and errors go to STDERR.
-For machine-readable output use 'node dist/...' or 'npm --silent run' — a plain
-'npm run' prepends its own banner to STDOUT and would corrupt JSON piping.`;
+--registry <projects.json> runs an INERT projection: it re-binds repos to their
+declared projects to MEASURE coverage, without changing the live MCP scope
+resolution (adoption is PR-3C). The JSON/Markdown report is written to STDOUT;
+progress and errors go to STDERR. For machine-readable output use 'node dist/...'
+or 'npm --silent run' — a plain 'npm run' prepends its banner to STDOUT.`;
 
 /**
  * Strict argument parser — NO silent fallbacks. An unknown flag, a missing value,
@@ -832,6 +975,8 @@ export function parseArgs(argv: string[]): CliOptions {
       const n = Number(raw);
       if (!Number.isInteger(n) || n < 1) throw new Error(`--repo-max-depth must be a positive integer (got "${raw}")`);
       o.repoMaxDepth = n;
+    } else if (a === "--registry") {
+      o.registryPath = need(++i, a);
     } else if (a === "--format") {
       const raw = need(++i, a).toLowerCase();
       if (raw !== "json" && raw !== "md" && raw !== "markdown") {
@@ -871,6 +1016,10 @@ function main(): void {
   let report: ProjectCoverageReport;
   try {
     report = runProjectCoverage(opts);
+    if (opts.registryPath) {
+      const reg = loadRegistry(opts.registryPath);
+      report = applyRegistryProjection(report, reg);
+    }
   } catch (e) {
     console.error(`[project-coverage] ${(e as Error).message}`);
     process.exit(1);

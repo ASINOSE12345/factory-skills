@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { execSync, spawnSync } from "node:child_process";
-import { runProjectCoverage, renderMarkdown, discoverRepos, parseArgs, type ProjectCoverageReport } from "../src/project-coverage-cli";
+import { runProjectCoverage, renderMarkdown, discoverRepos, parseArgs, applyRegistryProjection, type ProjectCoverageReport } from "../src/project-coverage-cli";
+import { loadRegistry } from "../src/registry";
 import { resetProjectAliasCache } from "../src/neurons";
 
 const roots: string[] = [];
@@ -85,6 +86,25 @@ function fullFixture(): string {
     bare: ["legacy-backup.git"],
   });
 }
+
+/** Write a temp registry file and return its path. */
+function writeRegistryFile(projects: unknown[]): string {
+  const dir = mkdtempSync(join(tmpdir(), "cov-reg-"));
+  roots.push(dir);
+  const p = join(dir, "projects.json");
+  writeFileSync(p, JSON.stringify({ version: 1, projects }));
+  return p;
+}
+
+/** A registry that binds every working-tree repo of fullFixture():
+ *  alpha (covered), beta multi-repo (beta covered + beta-v2 archived),
+ *  gamma external, factory-tools under a global project. */
+const FULL_REGISTRY = [
+  { project_id: "alpha", status: "active", repos: [{ repo_id: "alpha", role: "app" }] },
+  { project_id: "beta", status: "active", repos: [{ repo_id: "beta", role: "core" }, { repo_id: "beta-v2", role: "legacy", status: "archived" }] },
+  { project_id: "gamma", status: "external", repos: [{ repo_id: "gamma" }] },
+  { project_id: "platform", status: "active", is_global: true, repos: [{ repo_id: "factory-tools", role: "platform" }] },
+];
 
 beforeEach(() => {
   delete process.env.FACTORY_PROJECT_ALIASES_FILE;
@@ -390,5 +410,76 @@ describe("project-coverage — CLI contract (subprocess on dist)", () => {
     const res = spawnSync("node", [DIST, "--factory-root", root, "--repo-max-depth", "1.5"], { encoding: "utf8" });
     expect(res.status).toBe(1);
     expect(res.stderr).toMatch(/positive integer/);
+  });
+});
+
+describe("project-coverage — registry projection (inert, read-only)", () => {
+  it("baseline report has registry === null", () => {
+    expect(runProjectCoverage({ factoryRoot: fullFixture() }).registry).toBeNull();
+  });
+
+  it("resolves multi-repo ambiguity and applies per-repo statuses via the registry", () => {
+    const base = runProjectCoverage({ factoryRoot: fullFixture() });
+    expect(base.summary.ambiguous_candidates).toBe(2); // beta + beta-v2 (baseline heuristic)
+
+    const reg = loadRegistry(writeRegistryFile(FULL_REGISTRY));
+    const proj = applyRegistryProjection(base, reg);
+
+    expect(proj.summary.ambiguous_candidates).toBe(0); // registry attributes the repos
+    expect(proj.coverage.ambiguous).toEqual([]);
+    expect(proj.summary.covered_direct).toBe(2); // alpha, beta
+    expect(proj.summary.archived).toBe(1); // beta-v2
+    expect(proj.summary.external).toBe(1); // gamma
+    expect(proj.summary.global_only).toBe(1); // factory-tools
+    expect(proj.summary.registry_bound).toBe(5);
+
+    expect(proj.repos.find((r) => r.repo_id === "beta")!.classification).toBe("covered");
+    expect(proj.repos.find((r) => r.repo_id === "beta-v2")!.registry_status).toBe("archived");
+    expect(proj.repos.find((r) => r.repo_id === "gamma")!.registry_status).toBe("external");
+    expect(proj.repos.find((r) => r.repo_id === "factory-tools")!.global_only).toBe(true);
+    expect(proj.registry?.loaded).toBe(true);
+    expect(proj.registry?.repos_unbound).toEqual([]);
+  });
+
+  it("keeps the heuristic classification for repos absent from the registry", () => {
+    const reg = loadRegistry(writeRegistryFile([{ project_id: "alpha", status: "active", repos: [{ repo_id: "alpha" }] }]));
+    const proj = applyRegistryProjection(runProjectCoverage({ factoryRoot: fullFixture() }), reg);
+    expect(proj.coverage.covered).toContain("alpha");
+    expect(proj.coverage.ambiguous).toEqual(expect.arrayContaining(["beta", "beta-v2"])); // unbound → heuristic
+    expect(proj.registry?.repos_unbound).toEqual(expect.arrayContaining(["beta", "beta-v2", "gamma", "factory-tools"]));
+  });
+
+  it("surfaces registry alias collisions without throwing", () => {
+    const reg = loadRegistry(writeRegistryFile([
+      { project_id: "alpha", status: "active", aliases: ["shared"], repos: [{ repo_id: "alpha" }] },
+      { project_id: "beta", status: "active", aliases: ["shared"], repos: [{ repo_id: "beta" }] },
+    ]));
+    const proj = applyRegistryProjection(runProjectCoverage({ factoryRoot: fullFixture() }), reg);
+    expect(proj.registry?.alias_collisions.some((c) => c.alias === "shared")).toBe(true);
+  });
+});
+
+describe("project-coverage — registry projection (subprocess on dist)", () => {
+  const DIST = resolve("dist/project-coverage-cli.js");
+  beforeAll(() => {
+    if (!existsSync(DIST)) execSync("npm run build", { cwd: process.cwd(), stdio: "ignore" });
+  }, 60000);
+
+  it("--registry yields parseable JSON with registry.loaded and ambiguous resolved", () => {
+    const root = fullFixture();
+    const regPath = writeRegistryFile(FULL_REGISTRY);
+    const res = spawnSync("node", [DIST, "--factory-root", root, "--registry", regPath, "--format", "json"], { encoding: "utf8" });
+    expect(res.status).toBe(0);
+    const parsed = JSON.parse(res.stdout) as ProjectCoverageReport;
+    expect(parsed.registry?.loaded).toBe(true);
+    expect(parsed.summary.ambiguous_candidates).toBe(0);
+    expect(parsed.summary.registry_bound).toBe(5);
+  });
+
+  it("exits 1 on a missing/invalid registry file (no silent fallback)", () => {
+    const root = fullFixture();
+    const res = spawnSync("node", [DIST, "--factory-root", root, "--registry", "/no/such/registry-xyz.json", "--format", "json"], { encoding: "utf8" });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/invalid registry|file not found/);
   });
 });
