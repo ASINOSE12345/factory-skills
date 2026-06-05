@@ -19,6 +19,7 @@
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { createHash } from "node:crypto";
+import { ironGatesStateDir } from "./runtime-paths.js";
 
 export interface GateState {
   session_id: string;
@@ -33,9 +34,10 @@ const PREFIX = "iron-gates-state-";
 const LEGACY_BASENAME = "iron-gates-state.json";
 const STALE_MS = 24 * 60 * 60 * 1000; // 24h
 
-/** State directory. Defaults to /tmp (matching the legacy path); override in tests. */
+/** State directory — delegated to runtime-paths (single source). Precedence:
+ *  IRON_GATES_STATE_DIR (legacy/back-compat) → FACTORY_STATE_DIR → "/tmp". */
 function stateDir(): string {
-  return process.env.IRON_GATES_STATE_DIR || "/tmp";
+  return ironGatesStateDir();
 }
 
 /** Make a session_id safe to embed in a filename. Bounded; never empty. */
