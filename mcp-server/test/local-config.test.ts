@@ -97,18 +97,36 @@ describe("runGenerate — dry-run vs --write (real temp fixtures, never real con
     expect(readFileSync(mcpPath, "utf-8")).toBe(before); // untouched
   });
 
-  it("--write backs up and updates ONLY expected entries", () => {
+  const FIXED = () => new Date("2026-06-05T13:00:00.000Z");
+  const STAMP = "20260605T130000000Z";
+
+  it("--write backs up (TIMESTAMPED) and updates ONLY expected entries", () => {
     const { mcpPath, settingsPath } = fixtures();
-    const r = runGenerate({ factoryRoot: "/fr", runtimeRoot: "/rr", nodeBin: "/nb/node", mcpPath, settingsPath, write: true });
+    const r = runGenerate({ factoryRoot: "/fr", runtimeRoot: "/rr", nodeBin: "/nb/node", mcpPath, settingsPath, write: true, now: FIXED });
     expect(r.wrote).toBe(true);
-    expect(existsSync(`${mcpPath}.bak-pre-factory-config`)).toBe(true);
-    expect(existsSync(`${settingsPath}.bak-pre-factory-config`)).toBe(true);
+    expect(existsSync(`${mcpPath}.bak-pre-factory-config-${STAMP}`)).toBe(true);
+    expect(existsSync(`${settingsPath}.bak-pre-factory-config-${STAMP}`)).toBe(true);
+    expect(r.backups).toContain(`${mcpPath}.bak-pre-factory-config-${STAMP}`); // reported for restore
+    expect(r.summary.some((s) => s.includes("restore from"))).toBe(true);
     const mcp = JSON.parse(readFileSync(mcpPath, "utf-8"));
     expect(mcp.mcpServers["factory-code-graph"]).toEqual({ command: "X", args: ["a"] }); // preserved
     expect(mcp.mcpServers["factory-neurons"].args[0]).toBe("/rr/mcp-server/bin/factory-neurons-with-gemini.mjs");
     const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
     expect(settings.hooks.PreToolUse[0].hooks[0].command).toBe("/nb/node /rr/mcp-server/dist/iron-gates.js");
     expect(settings.hooks.PreToolUse[1].hooks[0].command).toBe("/bin/bash /x/snap.sh"); // foreign preserved
+  });
+
+  it("two consecutive --write with the SAME timestamp do NOT clobber the first backup", () => {
+    const { mcpPath } = fixtures();
+    const original = readFileSync(mcpPath, "utf-8");
+    runGenerate({ factoryRoot: "/fr", runtimeRoot: "/rr", nodeBin: "/nb/node", mcpPath, settingsPath: join(tmp(), "s.json"), write: true, now: FIXED });
+    const firstWrite = readFileSync(mcpPath, "utf-8");
+    const r2 = runGenerate({ factoryRoot: "/fr2", runtimeRoot: "/rr2", nodeBin: "/nb/node", mcpPath, settingsPath: join(tmp(), "s.json"), write: true, now: FIXED });
+    // first backup keeps the ORIGINAL; the second (-1 suffix) keeps the first write's output
+    expect(readFileSync(`${mcpPath}.bak-pre-factory-config-${STAMP}`, "utf-8")).toBe(original);
+    expect(existsSync(`${mcpPath}.bak-pre-factory-config-${STAMP}-1`)).toBe(true);
+    expect(readFileSync(`${mcpPath}.bak-pre-factory-config-${STAMP}-1`, "utf-8")).toBe(firstWrite);
+    expect(r2.backups.some((b) => b.endsWith(`${STAMP}-1`))).toBe(true);
   });
 });
 

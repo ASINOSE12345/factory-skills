@@ -131,6 +131,15 @@ export interface GenResult {
 
 /** Orchestrate generation. DRY-RUN unless opts.write. Operates on the GIVEN paths
  *  (tests pass temp fixtures; the real configs are only ever touched with --write). */
+/** Collision-safe timestamped backup path: <p>.bak-pre-factory-config-<stamp>[-N].
+ *  Never overwrites an existing backup (appends -N), so repeated --write is safe. */
+function backupPathFor(p: string, stamp: string): string {
+  let cand = `${p}.bak-pre-factory-config-${stamp}`;
+  let n = 1;
+  while (existsSync(cand)) cand = `${p}.bak-pre-factory-config-${stamp}-${n++}`;
+  return cand;
+}
+
 export function runGenerate(opts: {
   factoryRoot: string;
   runtimeRoot: string;
@@ -139,6 +148,8 @@ export function runGenerate(opts: {
   nodeBin?: string;
   write?: boolean;
   env?: NodeJS.ProcessEnv;
+  /** Injectable clock for deterministic backup timestamps in tests. */
+  now?: () => Date;
 }): GenResult {
   const nodeBin = resolveNodeBin({ nodeBin: opts.nodeBin, env: opts.env });
   const o: GenOpts = { nodeBin, runtimeRoot: opts.runtimeRoot, factoryRoot: opts.factoryRoot };
@@ -158,16 +169,18 @@ export function runGenerate(opts: {
     return { wrote: false, mcpPath: opts.mcpPath, settingsPath: opts.settingsPath, backups, summary };
   }
 
+  const stamp = (opts.now ?? (() => new Date()))().toISOString().replace(/[-:.]/g, "");
   for (const p of [opts.mcpPath, opts.settingsPath]) {
     if (existsSync(p)) {
-      const bak = `${p}.bak-pre-factory-config`;
+      const bak = backupPathFor(p, stamp);
       copyFileSync(p, bak);
       backups.push(bak);
     }
   }
   writeFileSync(opts.mcpPath, JSON.stringify(nextMcp, null, 2) + "\n", "utf-8");
   writeFileSync(opts.settingsPath, JSON.stringify(nextSettings, null, 2) + "\n", "utf-8");
-  summary.push(`wrote ${opts.mcpPath} + ${opts.settingsPath}; backups: ${backups.length}`);
+  summary.push(`wrote ${opts.mcpPath} + ${opts.settingsPath}`);
+  for (const b of backups) summary.push(`backup (restore from): ${b}`);
   return { wrote: true, mcpPath: opts.mcpPath, settingsPath: opts.settingsPath, backups, summary };
 }
 
