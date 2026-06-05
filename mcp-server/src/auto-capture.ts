@@ -377,7 +377,30 @@ function classifyError(command: string, stderr: string, exitCode: number): Error
   return null;
 }
 
-function shouldIgnore(command: string, stderr: string, exitCode: number): boolean {
+// An explicitly-marked, EXPECTED negative check is an audit command whose exit 1
+// is the *successful* result (e.g. `grep -c X f # EXPECTED_ZERO_MATCHES` → no
+// matches; `git diff --quiet` → no diff). auto-capture used to mis-record these
+// as errors (NE-616/617/620). The marker MUST appear in the command (never
+// inferred from output); the contract is deliberately narrow + fail-closed.
+const NEGATIVE_CHECK_MARKER = /FACTORY_EXPECTED_NEGATIVE_CHECK=1|EXPECTED_ZERO_MATCHES/;
+const REAL_ERROR = /command not found|no such file|fatal:|error:|Traceback|Exception|cannot |permission denied|EACCES|ENOENT/i;
+
+/**
+ * True ONLY for an explicitly-marked, expected negative check. Fail-closed:
+ *  - exit MUST be exactly 1 (the canonical no-match/no-diff code); >=2 = real error.
+ *  - the marker MUST be present IN THE COMMAND (never inferred from output).
+ *  - if `stderr` shows ANY real-error signature, it is NOT an expected negative.
+ * Pure + exported for tests. Does NOT touch Gate 2: recordsVerificationPass requires
+ * exit 0, so an expected negative (exit 1) can never record a verification pass.
+ */
+export function isExpectedNegativeCheck(command: string, stderr: string, exitCode: number): boolean {
+  if (exitCode !== 1) return false;
+  if (!NEGATIVE_CHECK_MARKER.test(command)) return false;
+  if (REAL_ERROR.test(stderr)) return false;
+  return true;
+}
+
+export function shouldIgnore(command: string, stderr: string, exitCode: number): boolean {
   // For compound commands (cd && ..., cd ; ...), check the LAST segment
   const cmdToCheck = command.includes("&&")
     ? command.split("&&").pop()!.trim()
@@ -392,6 +415,10 @@ function shouldIgnore(command: string, stderr: string, exitCode: number): boolea
 
   // Ignore if exit code is 0 (success)
   if (exitCode === 0) return true;
+
+  // Ignore an explicitly-marked expected negative check (exit 1 + marker + no real
+  // error). Fail-closed; never marks Gate 2 verification (that requires exit 0).
+  if (isExpectedNegativeCheck(command, stderr, exitCode)) return true;
 
   // Ignore if stderr is just warnings/noise
   const stderrLines = stderr.split("\n").filter((l) => l.trim().length > 0);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveExitAndStderr, recordsVerificationPass } from "../src/auto-capture";
+import { deriveExitAndStderr, recordsVerificationPass, shouldIgnore, isExpectedNegativeCheck } from "../src/auto-capture";
 
 // ─── Real hook payloads (captured from Claude Code, 2026-06-04) ───────────────
 //
@@ -123,5 +123,72 @@ describe("recordsVerificationPass — Gate 2 contract is fixed but NOT relaxed",
 
   it("does NOT record a pass for a non-verifier command that exited 0", () => {
     expect(recordsVerificationPass("cd repo && echo done", 0)).toBe(false);
+  });
+});
+
+describe("isExpectedNegativeCheck — explicit marker, fail-closed", () => {
+  it("true: exit 1 + FACTORY_EXPECTED_NEGATIVE_CHECK=1 + clean stderr", () => {
+    expect(isExpectedNegativeCheck("grep -c foo bar.txt # FACTORY_EXPECTED_NEGATIVE_CHECK=1", "", 1)).toBe(true);
+  });
+  it("true: exit 1 + EXPECTED_ZERO_MATCHES + benign stderr", () => {
+    expect(isExpectedNegativeCheck("git diff --quiet # EXPECTED_ZERO_MATCHES", "1 file differs", 1)).toBe(true);
+  });
+  it("false: no marker (never inferred)", () => {
+    expect(isExpectedNegativeCheck("grep -c foo bar.txt", "", 1)).toBe(false);
+  });
+  it("false: exit code is not exactly 1", () => {
+    expect(isExpectedNegativeCheck("grep -c x f # EXPECTED_ZERO_MATCHES", "", 2)).toBe(false);
+    expect(isExpectedNegativeCheck("grep -c x f # EXPECTED_ZERO_MATCHES", "", 0)).toBe(false);
+  });
+  it("false: a real error in stderr even WITH the marker (fail-closed)", () => {
+    for (const err of [
+      "fatal: not a git repository",
+      "bash: grep: command not found",
+      "Error: cannot find module 'x'",
+      "Traceback (most recent call last):",
+      "EACCES: permission denied, open 'x'",
+      "ENOENT: no such file or directory",
+    ]) {
+      expect(isExpectedNegativeCheck("grep -c x f # EXPECTED_ZERO_MATCHES", err, 1)).toBe(false);
+    }
+  });
+});
+
+describe("shouldIgnore — expected negative check (no over-capture, marker-driven)", () => {
+  // Benign-but-meaningful stderr so the ONLY thing that flips the decision is the
+  // marker — proving the marker, not noise, is what prevents capture (NE-620 class).
+  // NOTE: commands here are NOT in IGNORE_COMMANDS (rg/grep/rm) so the ONLY thing
+  // that flips the decision is the marker — git/ls/etc. are whitelisted upstream.
+  const benign = "1 file differs";
+  it("WITH FACTORY_EXPECTED_NEGATIVE_CHECK=1 + exit 1 → ignored", () => {
+    expect(shouldIgnore("rg -c x f.txt # FACTORY_EXPECTED_NEGATIVE_CHECK=1", benign, 1)).toBe(true);
+  });
+  it("WITH EXPECTED_ZERO_MATCHES + exit 1 → ignored", () => {
+    expect(shouldIgnore("grep -c x f.txt # EXPECTED_ZERO_MATCHES", benign, 1)).toBe(true);
+  });
+  it("SAME command WITHOUT marker + exit 1 → captured (shouldIgnore false)", () => {
+    expect(shouldIgnore("rg -c x f.txt", benign, 1)).toBe(false);
+  });
+  it("exit 2 WITH marker → captured (real-error code)", () => {
+    expect(shouldIgnore("grep -c x f.txt # EXPECTED_ZERO_MATCHES", benign, 2)).toBe(false);
+  });
+  it("real error WITH marker → captured (fail-closed)", () => {
+    expect(shouldIgnore("rg x f.txt # EXPECTED_ZERO_MATCHES", "fatal: not a git repository", 1)).toBe(false);
+    expect(shouldIgnore("rm x # EXPECTED_ZERO_MATCHES", "rm: x: Permission denied", 1)).toBe(false);
+  });
+  it("a genuinely failed verifier still captures (no marker)", () => {
+    expect(shouldIgnore("npm test", "FAIL src/x.test.ts\n  ● broke", 1)).toBe(false);
+  });
+  it("a passing command (exit 0) is still ignored", () => {
+    expect(shouldIgnore("npm test", "", 0)).toBe(true);
+  });
+});
+
+describe("Gate 2 unchanged — an expected negative check never records a pass", () => {
+  it("marker + exit 1 does NOT record a verification pass", () => {
+    expect(recordsVerificationPass("grep -c x f # EXPECTED_ZERO_MATCHES", 1)).toBe(false);
+  });
+  it("even a verifier-looking command + marker + exit 1 does not pass (needs exit 0)", () => {
+    expect(recordsVerificationPass("npm test # EXPECTED_ZERO_MATCHES", 1)).toBe(false);
   });
 });
