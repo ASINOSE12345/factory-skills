@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_comment": "Declarative project registry (PR-3B). Authored from observed evidence (git remotes + corpus tokens), conservative: no project is invented without evidence. NOT yet wired into live MCP scope resolution (that is PR-3C); measured today via `project-coverage --registry`. Review/edit by PR.",
+  "_comment": "Declarative project registry. Authored from observed evidence (git remotes + corpus tokens), conservative: no project is invented without evidence. NOT yet wired into live MCP scope resolution; measured via `project-coverage --registry`. PR-3C checkpoint: added jbcodingiot web aliases; folded PeopleSynapse-v1 as an archived repo (no v1-specific tokens). Paperclip is an EXTERNAL orchestrator tool (paperclipai), not a project — its knowledge belongs to jbcodingiot (lineage stays in neuron domain/tags), so it is intentionally absent here. Review/edit by PR.",
   "projects": [
     {
       "project_id": "urbanvistacapital",
@@ -17,17 +17,9 @@
       "status": "active",
       "aliases": ["ps"],
       "repos": [
-        { "repo_id": "PeopleSynapse", "role": "app", "status": "active", "note": "v2" }
+        { "repo_id": "PeopleSynapse", "role": "app", "status": "active", "note": "v2" },
+        { "repo_id": "PeopleSynapse-v1", "role": "v1", "status": "archived", "note": "distinct GitHub repo (ASINOSE12345/PeopleSynapse-v1), superseded by v2. Folded here (PR-3C): no v1-specific corpus tokens, so not a separate project." }
       ]
-    },
-    {
-      "project_id": "peoplesynapse-v1",
-      "status": "archived",
-      "aliases": ["ps-v1", "peoplesynapsev1"],
-      "repos": [
-        { "repo_id": "PeopleSynapse-v1", "role": "app", "status": "archived" }
-      ],
-      "note": "distinct GitHub repo (ASINOSE12345/PeopleSynapse-v1); superseded by peoplesynapse v2"
     },
     {
       "project_id": "olguisclass",
@@ -49,7 +41,7 @@
     {
       "project_id": "jbcodingiot",
       "status": "active",
-      "aliases": ["jbc"],
+      "aliases": ["jbc", "jbcodingiotweb", "jbcodingiot-web"],
       "repos": [
         { "repo_id": "jbcodingiot", "role": "core", "status": "active" },
         { "repo_id": "jbcodingiot-web", "role": "web", "status": "active", "note": "separate GitHub repo; web component of the same product" }
