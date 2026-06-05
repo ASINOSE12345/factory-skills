@@ -14,7 +14,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, copyFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 export interface GenOpts {
   nodeBin: string;
@@ -84,6 +84,27 @@ export function applySettings(existing: unknown, o: GenOpts): Record<string, unk
     }
   }
   return base;
+}
+
+/** Collect every hook command string from a Claude settings object (any event). */
+export function collectHookCommands(settings: unknown): string[] {
+  const out: string[] = [];
+  const hooks = (settings as { hooks?: Record<string, unknown> } | null)?.hooks;
+  if (hooks && typeof hooks === "object") {
+    for (const event of Object.keys(hooks)) {
+      const arr = hooks[event];
+      if (!Array.isArray(arr)) continue;
+      for (const matcher of arr) {
+        const hookList = (matcher as { hooks?: unknown }).hooks;
+        if (!Array.isArray(hookList)) continue;
+        for (const h of hookList) {
+          const cmd = (h as { command?: unknown }).command;
+          if (typeof cmd === "string") out.push(cmd);
+        }
+      }
+    }
+  }
+  return out;
 }
 
 // ── Validation (never prints secrets) ────────────────────────────────────────
@@ -158,6 +179,8 @@ export function runValidate(opts: {
   factoryRoot: string;
   mcpPath: string;
   settingsPath: string;
+  /** Expected node binary; if set, factory hook commands must use exactly this. */
+  nodeBin?: string;
 }): ValidateResult {
   const errors: string[] = [];
   const checks: string[] = [];
@@ -171,8 +194,15 @@ export function runValidate(opts: {
   // Structural + path-existence checks (only if mcp parses).
   if (existsSync(opts.mcpPath)) {
     try {
-      const mcp = JSON.parse(readFileSync(opts.mcpPath, "utf-8")) as { mcpServers?: Record<string, { args?: string[] }> };
+      const mcp = JSON.parse(readFileSync(opts.mcpPath, "utf-8")) as { mcpServers?: Record<string, { command?: string; args?: string[] }> };
       const fn = mcp.mcpServers?.["factory-neurons"];
+      // command (the node binary) must be present AND exist on disk
+      const cmd = fn?.command;
+      if (!cmd) errors.push("mcp: factory-neurons has no command (node binary)");
+      else if (opts.nodeBin && cmd !== opts.nodeBin) errors.push(`mcp: factory-neurons node '${cmd}' != expected '${opts.nodeBin}'`);
+      else if (!existsSync(cmd)) errors.push(`mcp: factory-neurons node binary missing at ${cmd}`);
+      else checks.push("factory-neurons node exists");
+      // args[0] must be the launcher and exist
       const launcher = fn?.args?.[0];
       if (!launcher || !launcher.endsWith("factory-neurons-with-gemini.mjs")) {
         errors.push("mcp: factory-neurons does not point to the launcher");
@@ -181,6 +211,11 @@ export function runValidate(opts: {
         if (!existsSync(launcher)) errors.push(`mcp: launcher missing at ${launcher}`);
         else checks.push("launcher exists");
       }
+      // args[1] must be the factory root (resolved equality)
+      const root = fn?.args?.[1];
+      if (!root || resolve(root) !== resolve(opts.factoryRoot)) {
+        errors.push(`mcp: factory-neurons project root '${root ?? "(none)"}' != factoryRoot '${opts.factoryRoot}'`);
+      } else checks.push("factory-neurons root matches");
       if (mcp.mcpServers?.["factory-code-graph"]) checks.push("factory-code-graph preserved");
     } catch { /* JSON error already reported */ }
   }
@@ -192,6 +227,28 @@ export function runValidate(opts: {
   }
   if (existsSync(opts.factoryRoot)) checks.push("factory root exists");
   else errors.push(`factory root missing: ${opts.factoryRoot}`);
+
+  // settings.json: each factory hook must reference the EXPECTED runtime dist script
+  // with an existing (or expected) node binary. Foreign hooks are ignored, not validated.
+  if (existsSync(opts.settingsPath)) {
+    try {
+      const settings = JSON.parse(readFileSync(opts.settingsPath, "utf-8"));
+      const cmds = collectHookCommands(settings);
+      for (const base of ["bootstrap-hook.js", "iron-gates.js", "plan-gate.js", "auto-capture.js"]) {
+        const expectedScript = join(dist, base);
+        const refs = cmds.filter((c) => c.includes(base));
+        if (refs.length === 0) { errors.push(`settings: no hook references ${base}`); continue; }
+        const right = refs.filter((c) => c.includes(expectedScript));
+        if (right.length === 0) { errors.push(`settings: ${base} hook does not point to runtime dist (${expectedScript}) — stale runtime?`); continue; }
+        checks.push(`settings ${base} → runtime dist`);
+        for (const c of right) {
+          const nodeTok = c.trim().split(/\s+/)[0];
+          if (opts.nodeBin && nodeTok !== opts.nodeBin) errors.push(`settings: ${base} node '${nodeTok}' != expected '${opts.nodeBin}'`);
+          else if (!existsSync(nodeTok)) errors.push(`settings: ${base} node binary missing at ${nodeTok}`);
+        }
+      }
+    } catch { /* JSON error already reported by validateConfigText */ }
+  }
 
   return { ok: errors.length === 0, errors, checks };
 }

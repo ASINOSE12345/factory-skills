@@ -20,6 +20,7 @@ function parse(argv) {
     else if (a === "--runtime-root") o.runtimeRoot = argv[++i];
     else if (a === "--mcp-config") o.mcpPath = argv[++i];
     else if (a === "--claude-settings") o.settingsPath = argv[++i];
+    else if (a === "--node-bin") o.nodeBin = argv[++i];
   }
   return o;
 }
@@ -31,6 +32,8 @@ if (!o.factoryRoot || !o.runtimeRoot) {
 }
 o.mcpPath = o.mcpPath || join(o.factoryRoot, ".mcp.json");
 o.settingsPath = o.settingsPath || join(homedir(), ".claude", "settings.json");
+// Expected node binary (optional): if given, factory commands must use exactly it.
+o.nodeBin = o.nodeBin || process.env.FACTORY_NODE_BIN;
 
 const res = runValidate(o);
 for (const c of res.checks) console.error(`[validate-config] OK: ${c}`);

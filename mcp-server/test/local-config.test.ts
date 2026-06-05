@@ -112,7 +112,8 @@ describe("runGenerate — dry-run vs --write (real temp fixtures, never real con
   });
 });
 
-describe("runValidate — fs checks (temp fixtures)", () => {
+describe("runValidate — fs + node + settings checks (temp fixtures)", () => {
+  const NODE = process.execPath; // an existing node binary
   function goodRuntime() {
     const rr = tmp();
     mkdirSync(join(rr, "mcp-server", "bin"), { recursive: true });
@@ -121,35 +122,106 @@ describe("runValidate — fs checks (temp fixtures)", () => {
     for (const h of ["bootstrap-hook.js", "iron-gates.js", "plan-gate.js", "auto-capture.js"]) writeFileSync(join(rr, "mcp-server", "dist", h), "//hook");
     return rr;
   }
-  it("passes on a correct fixture", () => {
+  // A fully-correct fixture; individual tests mutate one thing to make it fail.
+  function fullFixture(over: { mcp?: any; settings?: any } = {}) {
     const rr = goodRuntime();
     const fr = tmp();
+    const launcher = join(rr, "mcp-server/bin/factory-neurons-with-gemini.mjs");
+    const dist = join(rr, "mcp-server/dist");
     const mcpPath = join(tmp(), ".mcp.json");
     const settingsPath = join(tmp(), "settings.json");
-    writeFileSync(mcpPath, JSON.stringify({ mcpServers: { "factory-code-graph": { command: "X", args: ["a"] }, "factory-neurons": { command: "/nb", args: [join(rr, "mcp-server/bin/factory-neurons-with-gemini.mjs"), fr] } } }));
+    const mcp = over.mcp ?? { mcpServers: {
+      "factory-code-graph": { command: NODE, args: ["x"] },
+      "factory-neurons": { command: NODE, args: [launcher, fr] },
+    } };
+    const settings = over.settings ?? { hooks: {
+      PreToolUse: [
+        { matcher: "Bash", hooks: [{ command: `${NODE} ${join(dist, "iron-gates.js")}` }] },
+        { matcher: "*", hooks: [{ command: "/bin/bash /x/claude-snapshot-loader.sh" }] }, // foreign, ignored
+      ],
+      SessionStart: [{ matcher: "*", hooks: [{ command: `${NODE} ${join(dist, "bootstrap-hook.js")} ${fr}` }] }],
+      PostToolUse: [{ matcher: "Bash", hooks: [
+        { command: `${NODE} ${join(dist, "plan-gate.js")}` },
+        { command: `${NODE} ${join(dist, "auto-capture.js")}` },
+      ] }],
+    } };
+    writeFileSync(mcpPath, JSON.stringify(mcp));
+    writeFileSync(settingsPath, JSON.stringify(settings));
+    return { rr, fr, launcher, dist, mcpPath, settingsPath };
+  }
+
+  it("passes on a fully-correct fixture (and ignores foreign hooks)", () => {
+    const { rr, fr, mcpPath, settingsPath } = fullFixture();
+    const r = runValidate({ runtimeRoot: rr, factoryRoot: fr, mcpPath, settingsPath, nodeBin: NODE });
+    expect(r.ok).toBe(true);
+    expect(r.checks).toEqual(expect.arrayContaining(["factory-neurons node exists", "factory-neurons root matches", "factory-code-graph preserved", "settings iron-gates.js → runtime dist"]));
+  });
+
+  it("FAILS when factory-neurons.command (node) does not exist", () => {
+    const { rr, fr, launcher } = fullFixture();
+    const mcpPath = join(tmp(), ".mcp.json");
+    const settingsPath = join(tmp(), "settings.json");
+    writeFileSync(mcpPath, JSON.stringify({ mcpServers: { "factory-neurons": { command: "/no/such/node", args: [launcher, fr] } } }));
     writeFileSync(settingsPath, JSON.stringify({ hooks: {} }));
     const r = runValidate({ runtimeRoot: rr, factoryRoot: fr, mcpPath, settingsPath });
-    expect(r.ok).toBe(true);
-    expect(r.checks).toContain("factory-code-graph preserved");
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => /node binary missing/.test(e))).toBe(true);
   });
-  it("fails when the launcher is missing", () => {
-    const rr = goodRuntime();
-    const fr = tmp();
+
+  it("FAILS when factory-neurons args[1] points to a different factoryRoot", () => {
+    const { rr, fr, launcher, settingsPath } = fullFixture();
     const mcpPath = join(tmp(), ".mcp.json");
-    const settingsPath = join(tmp(), "settings.json");
-    writeFileSync(mcpPath, JSON.stringify({ mcpServers: { "factory-neurons": { command: "/nb", args: ["/does/not/exist/factory-neurons-with-gemini.mjs", fr] } } }));
-    writeFileSync(settingsPath, JSON.stringify({ hooks: {} }));
+    writeFileSync(mcpPath, JSON.stringify({ mcpServers: { "factory-neurons": { command: NODE, args: [launcher, "/some/other/root"] } } }));
+    const r = runValidate({ runtimeRoot: rr, factoryRoot: fr, mcpPath, settingsPath });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => /project root .* != factoryRoot/.test(e))).toBe(true);
+  });
+
+  it("FAILS when the launcher is missing", () => {
+    const { rr, fr, settingsPath } = fullFixture();
+    const mcpPath = join(tmp(), ".mcp.json");
+    writeFileSync(mcpPath, JSON.stringify({ mcpServers: { "factory-neurons": { command: NODE, args: ["/does/not/exist/factory-neurons-with-gemini.mjs", fr] } } }));
     const r = runValidate({ runtimeRoot: rr, factoryRoot: fr, mcpPath, settingsPath });
     expect(r.ok).toBe(false);
     expect(r.errors.some((e) => /launcher missing/.test(e))).toBe(true);
   });
-  it("fails when a secret appears in a config", () => {
-    const rr = goodRuntime();
-    const fr = tmp();
-    const mcpPath = join(tmp(), ".mcp.json");
+
+  it("FAILS when a settings factory hook points to a STALE runtime", () => {
+    const { rr, fr, mcpPath, dist } = fullFixture();
     const settingsPath = join(tmp(), "settings.json");
-    writeFileSync(mcpPath, JSON.stringify({ mcpServers: { "factory-neurons": { command: "/nb", args: [join(rr, "mcp-server/bin/factory-neurons-with-gemini.mjs"), fr], env: { GEMINI_API_KEY: "AIzaXXX" } } } }));
-    writeFileSync(settingsPath, JSON.stringify({ hooks: {} }));
+    writeFileSync(settingsPath, JSON.stringify({ hooks: {
+      PreToolUse: [{ matcher: "Bash", hooks: [{ command: `${NODE} /OLD/runtime/mcp-server/dist/iron-gates.js` }] }],
+      SessionStart: [{ matcher: "*", hooks: [{ command: `${NODE} ${join(dist, "bootstrap-hook.js")} ${fr}` }] }],
+      PostToolUse: [{ matcher: "Bash", hooks: [
+        { command: `${NODE} ${join(dist, "plan-gate.js")}` },
+        { command: `${NODE} ${join(dist, "auto-capture.js")}` },
+      ] }],
+    } }));
+    const r = runValidate({ runtimeRoot: rr, factoryRoot: fr, mcpPath, settingsPath, nodeBin: NODE });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => /iron-gates\.js hook does not point to runtime dist/.test(e))).toBe(true);
+  });
+
+  it("FAILS when a settings factory hook uses a non-existent node binary", () => {
+    const { rr, fr, mcpPath, dist } = fullFixture();
+    const settingsPath = join(tmp(), "settings.json");
+    writeFileSync(settingsPath, JSON.stringify({ hooks: {
+      PreToolUse: [{ matcher: "Bash", hooks: [{ command: `/no/such/node ${join(dist, "iron-gates.js")}` }] }],
+      SessionStart: [{ matcher: "*", hooks: [{ command: `${NODE} ${join(dist, "bootstrap-hook.js")} ${fr}` }] }],
+      PostToolUse: [{ matcher: "Bash", hooks: [
+        { command: `${NODE} ${join(dist, "plan-gate.js")}` },
+        { command: `${NODE} ${join(dist, "auto-capture.js")}` },
+      ] }],
+    } }));
+    const r = runValidate({ runtimeRoot: rr, factoryRoot: fr, mcpPath, settingsPath });
+    expect(r.ok).toBe(false);
+    expect(r.errors.some((e) => /iron-gates\.js node binary missing/.test(e))).toBe(true);
+  });
+
+  it("FAILS when a secret appears in a config", () => {
+    const { rr, fr, launcher, settingsPath } = fullFixture();
+    const mcpPath = join(tmp(), ".mcp.json");
+    writeFileSync(mcpPath, JSON.stringify({ mcpServers: { "factory-neurons": { command: NODE, args: [launcher, fr], env: { GEMINI_API_KEY: "AIzaXXX" } } } }));
     const r = runValidate({ runtimeRoot: rr, factoryRoot: fr, mcpPath, settingsPath });
     expect(r.ok).toBe(false);
     expect(r.errors.some((e) => /secret/.test(e))).toBe(true);
