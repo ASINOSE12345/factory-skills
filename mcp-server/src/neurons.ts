@@ -4,7 +4,9 @@
 
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { join, basename, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import matter from "gray-matter";
+import { tryLoadRegistry } from "./registry.js";
 
 export interface NeuronFrontmatter {
   id?: string;
@@ -199,16 +201,26 @@ function keywordScore(neuron: Neuron, terms: string[]): number {
 /**
  * ── Project scope / alias canonicalization ──────────────────────────────
  * Single source for resolving project names/aliases to a canonical token and
- * for classifying a neuron's scope. Aliases are EXTENSIBLE without touching
- * code: an external file (FACTORY_PROJECT_ALIASES_FILE, or
- * $FACTORY_ROOT/.factory/project-aliases.json) extends/overrides the inline
- * seed. The seed is only a startup fallback, never the source of truth.
+ * for classifying a neuron's scope. Resolution is LAYERED, highest precedence
+ * first:
+ *   1. registry alias index  (mcp-server/config/projects.json, or
+ *      FACTORY_PROJECT_REGISTRY_FILE) — the source of truth.
+ *   2. external aliases file (FACTORY_PROJECT_ALIASES_FILE, or
+ *      $FACTORY_ROOT/.factory/project-aliases.json).
+ *   3. inline seed — startup fallback only.
+ *
+ * `canonicalProject` / `isGlobalScope` use ALL layers (the live resolver).
+ * `canonicalProjectLegacy` / `isGlobalScopeLegacy` deliberately EXCLUDE the
+ * registry (seed + external only) — they preserve the pre-registry behavior so
+ * the no-loss gate can keep comparing "old (seed) vs new (registry)" even after
+ * the live resolver became registry-aware. A missing/invalid registry degrades
+ * cleanly to the legacy behavior (warn once, never crash).
  */
 interface AliasMap {
   [canonical: string]: string[];
 }
 
-// Inline seed — fallback only. Real/future projects come from the external file.
+// Inline seed — fallback only. Real/future projects come from the registry.
 const SEED_PROJECT_ALIASES: AliasMap = {
   urbanvistacapital: ["uv", "urbanvista", "urbanvistacapital"],
   peoplesynapse: ["ps", "peoplesynapse"],
@@ -224,8 +236,6 @@ function normalizeToken(s: string): string {
   return (s ?? "").toLowerCase().replace(/[\s_-]/g, "");
 }
 
-let _aliasIndexCache: Map<string, string> | null = null;
-
 /** Resolve the external aliases file path, if present. */
 function resolveAliasesFile(): string | null {
   const envFile = process.env.FACTORY_PROJECT_ALIASES_FILE;
@@ -238,56 +248,127 @@ function resolveAliasesFile(): string | null {
   return null;
 }
 
-/** Build (and cache) the alias→canonical index: seed extended/overridden by the external file. */
-function loadAliasIndex(): Map<string, string> {
-  if (_aliasIndexCache) return _aliasIndexCache;
+/** Resolve the registry file path: env override → package-relative default. Null if absent. */
+function resolveRegistryFile(): string | null {
+  const envFile = process.env.FACTORY_PROJECT_REGISTRY_FILE;
+  if (envFile) return existsSync(envFile) ? envFile : null;
+  try {
+    const def = fileURLToPath(new URL("../config/projects.json", import.meta.url));
+    return existsSync(def) ? def : null;
+  } catch {
+    return null;
+  }
+}
 
-  const merged: AliasMap = {};
-  for (const [canon, aliases] of Object.entries(SEED_PROJECT_ALIASES)) merged[canon] = [...aliases];
+interface AliasLayerOptions {
+  useSeed: boolean;
+  useExternal: boolean;
+  useRegistry: boolean;
+}
 
-  const ext = resolveAliasesFile();
-  if (ext) {
-    try {
-      const parsed = JSON.parse(readFileSync(ext, "utf-8")) as AliasMap;
-      for (const [canon, aliases] of Object.entries(parsed)) {
-        if (Array.isArray(aliases)) {
-          merged[canon] = Array.isArray(merged[canon]) ? [...merged[canon], ...aliases] : [...aliases];
-        }
+let _aliasLiveCache: Map<string, string> | null = null;
+let _aliasLegacyCache: Map<string, string> | null = null;
+let _registryWarned = false;
+
+/** Apply an AliasMap (canonical → aliases[]) onto the index (later layers override). */
+function applyAliasMap(idx: Map<string, string>, map: AliasMap): void {
+  for (const [canon, aliases] of Object.entries(map)) {
+    if (!Array.isArray(aliases)) continue;
+    const canonNorm = normalizeToken(canon);
+    if (canonNorm) idx.set(canonNorm, canonNorm);
+    for (const a of aliases) {
+      const n = normalizeToken(a);
+      if (n) idx.set(n, canonNorm);
+    }
+  }
+}
+
+/**
+ * Build an alias→canonical index from the requested layers. Precedence (lowest
+ * to highest, each overriding the previous): seed → external file → registry.
+ */
+function buildAliasIndex(opts: AliasLayerOptions): Map<string, string> {
+  const idx = new Map<string, string>();
+
+  if (opts.useSeed) applyAliasMap(idx, SEED_PROJECT_ALIASES);
+
+  if (opts.useExternal) {
+    const ext = resolveAliasesFile();
+    if (ext) {
+      try {
+        applyAliasMap(idx, JSON.parse(readFileSync(ext, "utf-8")) as AliasMap);
+      } catch (err) {
+        // Degrade cleanly — never crash on a bad config file.
+        console.warn(`[factory-neurons] Invalid project-aliases file ${ext}: ${(err as Error).message} — ignoring`);
       }
-    } catch (err) {
-      // Degrade cleanly to seed — never crash on a bad config file.
-      console.warn(`[factory-neurons] Invalid project-aliases file ${ext}: ${(err as Error).message} — using seed`);
     }
   }
 
-  const idx = new Map<string, string>();
-  for (const [canon, aliases] of Object.entries(merged)) {
-    const canonNorm = normalizeToken(canon);
-    idx.set(canonNorm, canonNorm);
-    for (const a of aliases) idx.set(normalizeToken(a), canonNorm);
+  if (opts.useRegistry) {
+    const regPath = resolveRegistryFile();
+    if (regPath) {
+      const reg = tryLoadRegistry(regPath, (msg) => {
+        if (!_registryWarned) {
+          _registryWarned = true;
+          console.warn(`[factory-neurons] Invalid project registry ${regPath}: ${msg} — falling back to external/seed aliases`);
+        }
+      });
+      // aliasToProject is already normalized and EXCLUDES organization /
+      // source_lineage entries, so lineage/org tokens never resolve to a project.
+      if (reg) for (const [norm, projectId] of reg.aliasToProject) idx.set(norm, projectId);
+    }
   }
-  _aliasIndexCache = idx;
+
   return idx;
 }
 
-/** Reset the alias cache. Test-only (lets tests swap FACTORY_PROJECT_ALIASES_FILE). */
-export function resetProjectAliasCache(): void {
-  _aliasIndexCache = null;
+/** Live alias index (registry + external + seed), cached. */
+function liveAliasIndex(): Map<string, string> {
+  if (!_aliasLiveCache) _aliasLiveCache = buildAliasIndex({ useSeed: true, useExternal: true, useRegistry: true });
+  return _aliasLiveCache;
 }
 
-/** Canonicalize a raw project/scope string to a stable token (alias-resolved, normalized fallback). */
+/** Legacy alias index (external + seed, NO registry), cached. */
+function legacyAliasIndex(): Map<string, string> {
+  if (!_aliasLegacyCache) _aliasLegacyCache = buildAliasIndex({ useSeed: true, useExternal: true, useRegistry: false });
+  return _aliasLegacyCache;
+}
+
+/** Reset all alias caches + the warn-once flag. Test-only (lets tests swap env files). */
+export function resetProjectAliasCache(): void {
+  _aliasLiveCache = null;
+  _aliasLegacyCache = null;
+  _registryWarned = false;
+}
+
+/** Canonicalize a raw project/scope string — LIVE resolver (registry → external → seed → raw). */
 export function canonicalProject(raw: string): string {
   const norm = normalizeToken(raw);
   if (!norm) return "";
-  return loadAliasIndex().get(norm) ?? norm;
+  return liveAliasIndex().get(norm) ?? norm;
 }
 
-/** True if a scope string denotes shared/factory-wide knowledge (not a concrete project). */
+/** Canonicalize WITHOUT the registry (external + seed only) — the pre-registry behavior. */
+export function canonicalProjectLegacy(raw: string): string {
+  const norm = normalizeToken(raw);
+  if (!norm) return "";
+  return legacyAliasIndex().get(norm) ?? norm;
+}
+
+/** True if a scope denotes shared/factory-wide knowledge — LIVE resolver. */
 export function isGlobalScope(scope: string): boolean {
   const norm = normalizeToken(scope);
   if (!norm) return false;
   if (GLOBAL_SCOPE_TOKENS.has(norm)) return true;
   return canonicalProject(norm) === "softwarefactory";
+}
+
+/** True if a scope denotes shared/factory-wide knowledge — legacy (registry-independent). */
+export function isGlobalScopeLegacy(scope: string): boolean {
+  const norm = normalizeToken(scope);
+  if (!norm) return false;
+  if (GLOBAL_SCOPE_TOKENS.has(norm)) return true;
+  return canonicalProjectLegacy(norm) === "softwarefactory";
 }
 
 // Scopes that DELIBERATELY mark knowledge as shared — these win over a `project` field.

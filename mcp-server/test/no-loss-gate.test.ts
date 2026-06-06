@@ -128,6 +128,31 @@ describe("no-loss-gate — unknown regression (seed-less mode) → FAIL", () => 
   });
 });
 
+describe("no-loss-gate — baseline `old` is registry-INDEPENDENT (keeps its teeth)", () => {
+  it("a registry remapping a seed alias surfaces as a relabel whose `old` is the SEED value", () => {
+    // If `old` had become registry-aware (the PR-3C-e blocker), both old & new
+    // would be 'somethingelse' and the gate would flag nothing. It must not.
+    const neuronsDir = setupNeurons([{ project: "uv" }]);
+    const reg = writeReg([{ project_id: "somethingelse", status: "active", aliases: ["uv"] }]);
+    const r = runNoLossGate({ neuronsDir, registryPath: reg });
+    const rel = r.unexpected_relabels.find((x) => x.token === "uv");
+    expect(rel).toBeDefined();
+    expect(rel!.old).toBe("urbanvistacapital"); // proves old = seed/legacy, not the registry
+    expect(rel!.new).toBe("somethingelse");
+    expect(r.pass).toBe(false);
+  });
+
+  it("the seed fallback in `new` uses the LEGACY resolver, not the live registry-aware one", () => {
+    // Registry does not cover 'uv'; with seed fallback ON, `new` must resolve it
+    // via the legacy seed (urbanvistacapital) — a registry-free path.
+    const neuronsDir = setupNeurons([{ project: "uv" }]);
+    const reg = writeReg([{ project_id: "other", status: "active" }]);
+    const r = runNoLossGate({ neuronsDir, registryPath: reg, seedFallback: true });
+    expect(r.unknown_regressions).toEqual([]);
+    expect(r.unexpected_relabels.find((x) => x.token === "uv")).toBeUndefined(); // old==new==seed
+  });
+});
+
 describe("no-loss-gate — helpers", () => {
   it("collectCorpusTokens returns distinct non-empty project/scope tokens", () => {
     const neuronsDir = setupNeurons([{ project: "uv" }, { project: "uv", scope: "global" }, { scope: "" }, {}]);

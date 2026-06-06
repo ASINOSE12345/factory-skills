@@ -224,3 +224,19 @@ export function loadRegistry(path: string): LoadedRegistry {
   const raw = validateRegistry(parsed);
   return indexRegistry(raw, path);
 }
+
+/**
+ * Non-throwing variant of {@link loadRegistry}: returns the loaded registry, or
+ * `null` if the file is missing / unreadable / malformed. Used by the live scope
+ * resolver (`neurons.ts`) so a bad or absent registry degrades cleanly to the
+ * seed/external fallback instead of crashing the MCP server. Errors are surfaced
+ * via the `onError` callback (callers warn once); they are never thrown.
+ */
+export function tryLoadRegistry(path: string, onError?: (message: string) => void): LoadedRegistry | null {
+  try {
+    return loadRegistry(path);
+  } catch (e) {
+    onError?.((e as Error).message);
+    return null;
+  }
+}
