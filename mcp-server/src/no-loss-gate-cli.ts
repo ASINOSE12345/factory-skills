@@ -32,7 +32,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { listNeurons, canonicalProject, isGlobalScope } from "./neurons.js";
+import { listNeurons, canonicalProjectLegacy, isGlobalScopeLegacy } from "./neurons.js";
 import { loadRegistry, normalizeToken, type LoadedRegistry } from "./registry.js";
 
 /** A canonical-label transition that is KNOWN and intentional. Data, not magic
@@ -101,16 +101,27 @@ export interface NoLossGateReport {
   pass: boolean;
 }
 
-/** Seed (current) resolution of a token. */
+/**
+ * Legacy (seed + external, registry-INDEPENDENT) resolution. This is the baseline
+ * the gate compares against. It uses the `*Legacy` resolvers ON PURPOSE: now that
+ * the live `canonicalProject`/`isGlobalScope` are registry-aware, using them here
+ * would make `old` and `new` both registry-driven and the gate would lose its
+ * teeth. The legacy resolvers preserve the pre-registry behavior.
+ */
 function resolveOld(token: string): string {
-  return isGlobalScope(token) ? "global" : canonicalProject(token);
+  return isGlobalScopeLegacy(token) ? "global" : canonicalProjectLegacy(token);
 }
-/** Registry-primary resolution; seed fallback only when enabled (models seed-less mode). */
+/**
+ * Registry-primary resolution using the EXPLICIT `--registry` argument; falls back
+ * to the legacy (seed) resolver only when enabled (`--no-seed-fallback` models the
+ * future seed-less mode). Globality is decided by the registry-independent legacy
+ * check, so the gate stays deterministic and never mixes two registry sources.
+ */
 function resolveNew(token: string, reg: LoadedRegistry, seedFallback: boolean): string {
-  if (isGlobalScope(token)) return "global";
+  if (isGlobalScopeLegacy(token)) return "global";
   const a = reg.aliasToProject.get(normalizeToken(token));
   if (a) return a;
-  return seedFallback ? canonicalProject(token) : normalizeToken(token);
+  return seedFallback ? canonicalProjectLegacy(token) : normalizeToken(token);
 }
 /** A scope is "recognized" if it is global or it matched an alias/canonical
  *  (i.e. it is NOT just the raw normalized token). */
