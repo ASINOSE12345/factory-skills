@@ -45,8 +45,10 @@ describe("no-loss-gate — PASS with the shipped registry", () => {
     expect(r.merges).toEqual([]);
     expect(r.splits).toEqual([]);
     expect(r.critical_failures).toEqual([]);
-    // factory-os is the expected, safe relabel (factoryos → factory-os)
-    expect(r.changes.some((c) => c.token === "factory-os" && c.old === "factoryos" && c.new === "factory-os")).toBe(true);
+    expect(r.unexpected_relabels).toEqual([]);
+    expect(r.unknown_regressions).toEqual([]);
+    // factory-os is the expected, allowlisted relabel (factoryos → factory-os)
+    expect(r.allowed_relabels.some((c) => c.token === "factory-os" && c.old === "factoryos" && c.new === "factory-os")).toBe(true);
   });
 });
 
@@ -86,6 +88,43 @@ describe("no-loss-gate — critical-token protection → FAIL when a registry dr
     const r = runNoLossGate({ neuronsDir, registryPath: reg });
     expect(r.pass).toBe(false);
     expect(r.critical_failures.some((c) => c.token === "factory-os")).toBe(true);
+  });
+});
+
+describe("no-loss-gate — unexpected relabel (not on allowlist) → FAIL", () => {
+  it("flags a relabel that is not in DEFAULT_ALLOWED_RELABELS", () => {
+    const neuronsDir = setupNeurons([{ project: "alpha" }]); // seed: 'alpha' is self → unrecognized
+    const reg = writeReg([{ project_id: "alphaproj", status: "active", aliases: ["alpha"] }]); // alpha → alphaproj
+    const r = runNoLossGate({ neuronsDir, registryPath: reg });
+    expect(r.pass).toBe(false);
+    expect(r.unexpected_relabels.some((c) => c.token === "alpha" && c.new === "alphaproj")).toBe(true);
+  });
+
+  it("the same relabel PASSES when explicitly allowlisted (data, not code)", () => {
+    const neuronsDir = setupNeurons([{ project: "alpha" }]);
+    const reg = writeReg([{ project_id: "alphaproj", status: "active", aliases: ["alpha"] }]);
+    const r = runNoLossGate({ neuronsDir, registryPath: reg, allowedRelabels: [{ from: "alpha", to: "alphaproj" }] });
+    expect(r.unexpected_relabels).toEqual([]);
+    expect(r.allowed_relabels.some((c) => c.token === "alpha")).toBe(true);
+    // (still fails overall only on critical tokens this minimal registry lacks — assert the relabel part)
+  });
+});
+
+describe("no-loss-gate — unknown regression (seed-less mode) → FAIL", () => {
+  it("flags a token that resolved under seed but falls back to raw with --no-seed-fallback", () => {
+    const neuronsDir = setupNeurons([{ project: "uv" }]); // seed: uv → urbanvistacapital (recognized)
+    const reg = writeReg([{ project_id: "other", status: "active" }]); // registry does NOT cover uv
+    const r = runNoLossGate({ neuronsDir, registryPath: reg, seedFallback: false });
+    expect(r.seed_fallback).toBe(false);
+    expect(r.pass).toBe(false);
+    expect(r.unknown_regressions.some((c) => c.token === "uv" && c.old === "urbanvistacapital" && c.new === "uv")).toBe(true);
+  });
+
+  it("with seed fallback ON, the same token does NOT regress (seed still resolves it)", () => {
+    const neuronsDir = setupNeurons([{ project: "uv" }]);
+    const reg = writeReg([{ project_id: "other", status: "active" }]);
+    const r = runNoLossGate({ neuronsDir, registryPath: reg, seedFallback: true });
+    expect(r.unknown_regressions).toEqual([]); // seed fallback keeps uv → urbanvistacapital
   });
 });
 
