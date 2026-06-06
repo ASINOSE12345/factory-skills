@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -195,6 +195,35 @@ describe("canonicalProject — registry wiring (live) vs legacy resolver", () =>
     expect(() => canonicalProject("uv")).not.toThrow();
     expect(canonicalProject("uv")).toBe("urbanvistacapital"); // seed fallback
     expect(canonicalProject("factoryos")).toBe("factoryos"); // no registry → raw
+  });
+
+  it("warns ONCE when FACTORY_PROJECT_REGISTRY_FILE points to a missing path (observable degradation)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      process.env.FACTORY_PROJECT_REGISTRY_FILE = join(tmp.dir, "nope-missing.json");
+      resetProjectAliasCache();
+      // Several live lookups → the index builds once → exactly one warning.
+      expect(canonicalProject("uv")).toBe("urbanvistacapital"); // legacy fallback
+      expect(canonicalProject("factoryos")).toBe("factoryos"); // no registry → raw
+      expect(canonicalProjectLegacy("uv")).toBe("urbanvistacapital");
+      const hits = warn.mock.calls.filter((c) => String(c[0]).includes("FACTORY_PROJECT_REGISTRY_FILE points to a missing path"));
+      expect(hits.length).toBe(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does NOT warn about a missing path when the env var is unset (package default absent is normal)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      delete process.env.FACTORY_PROJECT_REGISTRY_FILE;
+      resetProjectAliasCache();
+      expect(() => canonicalProject("uv")).not.toThrow();
+      const hits = warn.mock.calls.filter((c) => String(c[0]).includes("points to a missing path"));
+      expect(hits.length).toBe(0);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("an invalid registry file degrades to legacy without throwing", () => {
