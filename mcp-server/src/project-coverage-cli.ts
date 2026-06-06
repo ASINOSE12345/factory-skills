@@ -42,7 +42,7 @@ import {
   type Neuron,
   type NeuronCategory,
 } from "./neurons.js";
-import { loadRegistry, type LoadedRegistry, type ProjectStatus } from "./registry.js";
+import { loadRegistry, NON_INDEXED_ENTITY_TYPES, type LoadedRegistry, type ProjectStatus } from "./registry.js";
 
 // ── Constants / heuristics (documented, never silent) ───────────────────────
 
@@ -218,6 +218,34 @@ export interface RegistryProjection {
   alias_collisions: Array<{ alias: string; project_ids: string[] }>;
   repo_collisions: Array<{ repo_id: string; project_ids: string[] }>;
   project_neurons: Record<string, number>;
+  // ── Registry v2 metadata report (entity_type / reuse_scope / lineage) ──────
+  // Diagnostic only. NOT coverage and NOT access control: reuse_scope classifies
+  // how broadly knowledge may be reused, it is not authZ. organization /
+  // source_lineage entries are reported but never count as project coverage.
+  entities: RegistryEntityReport[];
+  entity_type_counts: Record<string, number>;
+  reuse_scope_counts: Record<string, number>;
+  lineage_counts: Record<string, number>;
+  entries_missing_entity_type: string[];
+  entries_missing_reuse_scope: string[];
+  source_lineage_entries: string[];
+}
+
+/** One registry entry's v2 metadata, as reported by the auditor. */
+export interface RegistryEntityReport {
+  project_id: string;
+  /** Declared entity_type, or "project" when absent (the default). */
+  entity_type: string;
+  status: string;
+  is_global: boolean;
+  reuse_scope: string | null;
+  lineage: string[];
+  repos_count: number;
+  aliases_count: number;
+  /** Project-specific neurons resolving here (0 for non-indexed entities). */
+  project_neurons: number;
+  /** false for organization / source_lineage (excluded from the alias/repo index). */
+  indexed: boolean;
 }
 
 export type RegistryClassification =
@@ -787,6 +815,39 @@ export function applyRegistryProjection(base: ProjectCoverageReport, reg: Loaded
   // ambiguous by the baseline heuristic.
   const ambiguousAfter = unbound.filter((r) => r.classification === "ambiguous").length;
 
+  // ── Registry v2 metadata report (entity_type / reuse_scope / lineage) ───────
+  // Diagnostic only — NOT coverage, NOT authZ. organization & source_lineage
+  // entries are reported but never count as project coverage (indexed=false).
+  const entities: RegistryEntityReport[] = reg.raw.projects
+    .map((p) => {
+      const entity_type = p.entity_type ?? "project";
+      return {
+        project_id: p.project_id,
+        entity_type,
+        status: p.status,
+        is_global: p.is_global === true,
+        reuse_scope: p.reuse_scope ?? null,
+        lineage: p.lineage ?? [],
+        repos_count: (p.repos ?? []).length,
+        aliases_count: (p.aliases ?? []).length,
+        project_neurons: projNeurons.get(p.project_id) ?? 0,
+        indexed: !NON_INDEXED_ENTITY_TYPES.has(entity_type),
+      };
+    })
+    .sort((a, b) => a.project_id.localeCompare(b.project_id));
+
+  const countBy = (vals: string[]): Record<string, number> => {
+    const m: Record<string, number> = {};
+    for (const v of vals) m[v] = (m[v] ?? 0) + 1;
+    return m;
+  };
+  const entity_type_counts = countBy(entities.map((e) => e.entity_type));
+  const reuse_scope_counts = countBy(entities.map((e) => e.reuse_scope ?? "unknown"));
+  const lineage_counts = countBy(entities.flatMap((e) => e.lineage));
+  const entries_missing_entity_type = reg.raw.projects.filter((p) => p.entity_type === undefined).map((p) => p.project_id).sort();
+  const entries_missing_reuse_scope = reg.raw.projects.filter((p) => p.reuse_scope === undefined).map((p) => p.project_id).sort();
+  const source_lineage_entries = entities.filter((e) => e.entity_type === "source_lineage").map((e) => e.project_id).sort();
+
   return {
     // summary + coverage are intentionally the BASELINE values (no registry recompute).
     ...base,
@@ -806,6 +867,13 @@ export function applyRegistryProjection(base: ProjectCoverageReport, reg: Loaded
       alias_collisions: reg.aliasCollisions,
       repo_collisions: reg.repoCollisions,
       project_neurons: Object.fromEntries([...projNeurons.entries()].sort((a, b) => b[1] - a[1])),
+      entities,
+      entity_type_counts,
+      reuse_scope_counts,
+      lineage_counts,
+      entries_missing_entity_type,
+      entries_missing_reuse_scope,
+      source_lineage_entries,
     },
   };
 }
@@ -875,6 +943,20 @@ export function renderMarkdown(r: ProjectCoverageReport): string {
     L.push(`Ambiguous after registry: **${rg.ambiguous_after}** (baseline ambiguous_candidates: ${s.ambiguous_candidates}; baseline covered_direct: ${s.covered_direct}).`);
     if (rg.alias_collisions.length > 0) L.push(`- ⚠ alias collisions: ${rg.alias_collisions.map((c) => `${c.alias}→{${c.project_ids.join("|")}}`).join(", ")}`);
     if (rg.repo_collisions.length > 0) L.push(`- ⚠ repo collisions: ${rg.repo_collisions.map((c) => `${c.repo_id}→{${c.project_ids.join("|")}}`).join(", ")}`);
+    L.push("");
+    L.push(`### Registry v2 metadata (entity_type / reuse_scope / lineage)`);
+    L.push(`_Diagnostic only. \`reuse_scope\` classifies how broadly knowledge may be REUSED — it is NOT access control / authZ. organization & source_lineage entries are reported but never count as project coverage._`);
+    L.push("");
+    L.push(`| project_id | entity_type | status | reuse_scope | lineage | indexed | neurons |`);
+    L.push(`|---|---|---|---|---|---|---|`);
+    for (const e of rg.entities) L.push(`| ${e.project_id} | ${e.entity_type} | ${e.status} | ${e.reuse_scope ?? "—"} | ${e.lineage.join(", ") || "—"} | ${e.indexed ? "yes" : "no"} | ${e.project_neurons} |`);
+    L.push("");
+    L.push(`- entity_type counts: ${Object.entries(rg.entity_type_counts).map(([k, v]) => `${k}:${v}`).join(" · ") || "—"}`);
+    L.push(`- reuse_scope counts: ${Object.entries(rg.reuse_scope_counts).map(([k, v]) => `${k}:${v}`).join(" · ") || "—"}`);
+    L.push(`- lineage counts: ${Object.entries(rg.lineage_counts).map(([k, v]) => `${k}:${v}`).join(" · ") || "—"}`);
+    if (rg.source_lineage_entries.length > 0) L.push(`- source_lineage (NOT project coverage): ${rg.source_lineage_entries.join(", ")}`);
+    if (rg.entries_missing_entity_type.length > 0) L.push(`- missing entity_type (default → project): ${rg.entries_missing_entity_type.join(", ")}`);
+    if (rg.entries_missing_reuse_scope.length > 0) L.push(`- missing reuse_scope: ${rg.entries_missing_reuse_scope.join(", ")}`);
     L.push("");
   }
 

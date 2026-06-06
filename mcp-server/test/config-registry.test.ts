@@ -16,17 +16,39 @@ describe("config/projects.json — shipped registry is valid", () => {
     expect(reg.raw.version).toBe(1);
   });
 
-  it("contains exactly the expected project_ids (checkpoint decisions)", () => {
+  it("contains exactly the expected entries (v2 ontology)", () => {
     const reg = loadRegistry(REG);
     const ids = [...reg.projectById.keys()].sort();
     expect(ids).toEqual(
-      ["factory-os", "jbcodingiot", "olguisclass", "peoplesynapse", "softwarefactory", "urbanvistacapital"].sort(),
+      ["factory-os", "jbcodingiot", "jbcodingiot-org", "olguisclass", "paperclip", "peoplesynapse", "softwarefactory", "urbanvistacapital"].sort(),
     );
-    // explicitly excluded by operator decision
-    expect(reg.projectById.has("paperclip")).toBe(false);
+    // still excluded by operator decision
     expect(reg.projectById.has("paperclip-platform")).toBe(false);
     expect(reg.projectById.has("factory-knowledge")).toBe(false);
     expect(reg.projectById.has("peoplesynapse-v1")).toBe(false);
+  });
+
+  it("organization & source_lineage are present but NEVER resolvable projects (excluded from alias index)", () => {
+    const reg = loadRegistry(REG);
+    expect(reg.projectById.get("jbcodingiot-org")?.entity_type).toBe("organization");
+    expect(reg.projectById.get("paperclip")?.entity_type).toBe("source_lineage");
+    expect(reg.projectById.get("paperclip")?.status).toBe("legacy");
+    // excluded from the alias index → a neuron can never resolve to them
+    expect(reg.aliasToProject.get(normalizeToken("jbcodingiot-org"))).toBeUndefined();
+    expect(reg.aliasToProject.get(normalizeToken("paperclip"))).toBeUndefined();
+    // org id is normalize-distinct from the product token (no collision)
+    expect(normalizeToken("jbcodingiot-org")).not.toBe(normalizeToken("jbcodingiot"));
+    expect(reg.aliasToProject.get(normalizeToken("jbcodingiot"))).toBe("jbcodingiot");
+  });
+
+  it("v2 fields are populated additively on existing entries", () => {
+    const reg = loadRegistry(REG);
+    expect(reg.projectById.get("urbanvistacapital")?.entity_type).toBe("client");
+    expect(reg.projectById.get("urbanvistacapital")?.reuse_scope).toBe("tenant_private");
+    expect(reg.projectById.get("jbcodingiot")?.entity_type).toBe("project");
+    expect(reg.projectById.get("jbcodingiot")?.lineage).toEqual(["paperclip"]);
+    expect(reg.projectById.get("factory-os")?.entity_type).toBe("operating_system");
+    expect(reg.projectById.get("softwarefactory")?.is_global).toBe(true);
   });
 
   it("jbcodingiot carries the web aliases (so the seed can be removed in PR-3C)", () => {
