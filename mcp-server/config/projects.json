@@ -1,64 +1,106 @@
 {
   "version": 1,
-  "_comment": "Declarative project registry. Authored from observed evidence (git remotes + corpus tokens), conservative: no project is invented without evidence. NOT yet wired into live MCP scope resolution; measured via `project-coverage --registry`. PR-3C checkpoint: added jbcodingiot web aliases; folded PeopleSynapse-v1 as an archived repo (no v1-specific tokens). Paperclip is an EXTERNAL orchestrator tool (paperclipai), not a project — its knowledge belongs to jbcodingiot (lineage stays in neuron domain/tags), so it is intentionally absent here. Review/edit by PR.",
+  "_comment": "Declarative project registry. Authored from observed evidence (git remotes + corpus tokens). v2 fields (entity_type/owner_id/parent_id/reuse_scope/lineage) added per ADR-0001, ADDITIVELY: project_id/aliases/repos of existing entries are unchanged, so scope resolution and the no-loss gate are unaffected. reuse_scope is a REUSE classification, NOT access control / authZ. organization and source_lineage entries are addressable for reporting but are excluded from the alias/repo indexes (never a project a neuron resolves to). Paperclip is a legacy external orchestrator (source_lineage), never a project_id. NOT yet wired into live MCP scope resolution. Review/edit by PR.",
   "projects": [
     {
       "project_id": "urbanvistacapital",
+      "entity_type": "client",
       "status": "active",
+      "owner_id": "jbcodingiot-org",
+      "reuse_scope": "tenant_private",
       "aliases": ["uv", "urbanvista"],
+      "lineage": [],
       "repos": [
         { "repo_id": "UrbanVistaCapital-portal-inmobiliario", "role": "app", "status": "active" },
         { "repo_id": "UrbanVistaCapital-v1-BACKUP.git", "role": "backup", "status": "archived", "note": "bare mirror of the app repo" }
       ],
-      "note": "509 corpus neurons; repo dir name does not alias-resolve to the canonical without this entry"
+      "note": "509 corpus neurons; client (cliente+socio) operated through FactoryOS"
     },
     {
       "project_id": "peoplesynapse",
+      "entity_type": "client",
       "status": "active",
+      "owner_id": "jbcodingiot-org",
+      "reuse_scope": "tenant_private",
       "aliases": ["ps"],
+      "lineage": [],
       "repos": [
         { "repo_id": "PeopleSynapse", "role": "app", "status": "active", "note": "v2" },
         { "repo_id": "PeopleSynapse-v1", "role": "v1", "status": "archived", "note": "distinct GitHub repo (ASINOSE12345/PeopleSynapse-v1), superseded by v2. Folded here (PR-3C): no v1-specific corpus tokens, so not a separate project." }
-      ]
+      ],
+      "note": "in-house SaaS, but for FactoryOS it operates as a tenant/work context — modeled as client, not organization"
     },
     {
       "project_id": "olguisclass",
+      "entity_type": "client",
       "status": "active",
+      "owner_id": "jbcodingiot-org",
+      "reuse_scope": "tenant_private",
       "aliases": ["oc", "olguis"],
+      "lineage": [],
       "repos": [
         { "repo_id": "Olgui-s_Class", "role": "app", "status": "active" }
-      ]
+      ],
+      "note": "e-learning client operated through FactoryOS"
     },
     {
       "project_id": "factory-os",
+      "entity_type": "operating_system",
       "status": "active",
+      "owner_id": "jbcodingiot-org",
+      "parent_id": "softwarefactory",
+      "reuse_scope": "internal",
       "aliases": ["factoryos"],
+      "lineage": ["paperclip"],
       "repos": [
         { "repo_id": "factory-os", "role": "app", "status": "active" },
         { "repo_id": "factory-os-progress-map", "role": "docs", "status": "active", "note": "second local checkout of the SAME GitHub repo (branch docs/progress-map)" }
-      ]
+      ],
+      "note": "FactoryOS runtime; replaced the Paperclip orchestrator (lineage)"
     },
     {
       "project_id": "jbcodingiot",
+      "entity_type": "project",
       "status": "active",
+      "owner_id": "jbcodingiot-org",
+      "reuse_scope": "internal",
       "aliases": ["jbc", "jbcodingiotweb", "jbcodingiot-web"],
+      "lineage": ["paperclip"],
       "repos": [
         { "repo_id": "jbcodingiot", "role": "core", "status": "active" },
         { "repo_id": "jbcodingiot-web", "role": "web", "status": "active", "note": "separate GitHub repo; web component of the same product" }
       ],
-      "note": "modeled as one product with core + web component repos (not interchangeable aliases)"
+      "note": "internal product/context/repo (core + web). NOT the parent company. Paperclip lineage = multi-agent spike."
     },
     {
       "project_id": "softwarefactory",
+      "entity_type": "platform",
       "status": "active",
       "is_global": true,
+      "owner_id": "jbcodingiot-org",
+      "reuse_scope": "global",
       "aliases": ["sf", "factory"],
+      "lineage": [],
       "repos": [
         { "repo_id": "factory-skills", "role": "platform", "status": "active", "note": "MCP server + skills (this repo)" },
         { "repo_id": "jb-software-factory", "role": "governance", "status": "active" },
         { "repo_id": "jb-coding-software-factory", "role": "control-plane", "status": "active", "note": "no git remote (local-only)" }
       ],
-      "note": "platform/factory-wide knowledge is global scope; these repos are covered by global neurons, not project-specific ones"
+      "note": "Factory / platform. Kept conservative: NOT split into Factory Memory / Factory Skills entries in this PR (would move repos and risk the gate). is_global preserved."
+    },
+    {
+      "project_id": "jbcodingiot-org",
+      "entity_type": "organization",
+      "status": "active",
+      "reuse_scope": "internal",
+      "note": "JB Coding IoT — parent company / owner. Id deliberately distinct from the 'jbcodingiot' product token. Excluded from the alias index (a container, not a neuron's project)."
+    },
+    {
+      "project_id": "paperclip",
+      "entity_type": "source_lineage",
+      "status": "legacy",
+      "reuse_scope": "internal",
+      "note": "legacy external orchestrator (paperclipai). Source lineage only — NEVER a resolvable project_id. Excluded from the alias index. Knowledge lives under jbcodingiot with paperclip lineage/domain/tags."
     }
   ]
 }

@@ -110,7 +110,7 @@ const REUSE_SCOPES: ReadonlySet<string> = new Set([
 /** Entity types that do NOT own neurons/repos. Excluded from the alias & repo
  *  indexes so a lineage/organization entry can never become a project that a
  *  neuron resolves to (enforces the ADR-0001 Paperclip rule structurally). */
-const NON_INDEXED_ENTITY_TYPES: ReadonlySet<string> = new Set(["source_lineage", "organization"]);
+export const NON_INDEXED_ENTITY_TYPES: ReadonlySet<string> = new Set(["source_lineage", "organization"]);
 
 /** Same normalization the neuron scope model uses (lowercase, strip separators). */
 export function normalizeToken(s: string): string {

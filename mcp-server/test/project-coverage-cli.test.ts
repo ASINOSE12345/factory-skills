@@ -507,3 +507,61 @@ describe("project-coverage — registry projection (subprocess on dist)", () => 
     expect(res.stderr).toMatch(/invalid registry|file not found/);
   });
 });
+
+describe("project-coverage — registry v2 reporting (entity_type / reuse_scope / lineage)", () => {
+  it("reports v2 metadata + aggregates WITHOUT changing summary or coverage", () => {
+    const root = setupFactory({
+      neurons: [{ cat: "errors", id: "NE-001", project: "alpha" }, { cat: "errors", id: "NE-002", project: "beta" }],
+      repos: ["alpha", "beta"],
+    });
+    const base = runProjectCoverage({ factoryRoot: root });
+    const reg = loadRegistry(writeRegistryFile([
+      { project_id: "alpha", entity_type: "client", status: "active", reuse_scope: "tenant_private", aliases: ["alpha"], lineage: [] },
+      { project_id: "beta", entity_type: "project", status: "active", reuse_scope: "internal", aliases: ["beta"], lineage: ["paperclip"] },
+      { project_id: "myorg", entity_type: "organization", status: "active" },
+      { project_id: "pc", entity_type: "source_lineage", status: "legacy", aliases: ["pc-alias"] },
+    ]));
+    const proj = applyRegistryProjection(base, reg);
+    const rg = proj.registry!;
+
+    // baseline untouched — the registry block is diagnostic, never recomputes coverage
+    expect(proj.summary).toEqual(base.summary);
+    expect(proj.coverage).toEqual(base.coverage);
+
+    expect(rg.entity_type_counts).toEqual({ client: 1, project: 1, organization: 1, source_lineage: 1 });
+    expect(rg.reuse_scope_counts).toEqual({ tenant_private: 1, internal: 1, unknown: 2 });
+    expect(rg.lineage_counts).toEqual({ paperclip: 1 });
+    expect(rg.source_lineage_entries).toEqual(["pc"]);
+    expect(rg.entries_missing_reuse_scope.slice().sort()).toEqual(["myorg", "pc"]);
+
+    const byId = Object.fromEntries(rg.entities.map((e) => [e.project_id, e]));
+    expect(byId["alpha"].entity_type).toBe("client");
+    expect(byId["beta"].lineage).toEqual(["paperclip"]);
+    expect(byId["myorg"].indexed).toBe(false); // organization excluded from index
+    expect(byId["pc"].indexed).toBe(false); // source_lineage excluded from index
+
+    // organization & source_lineage NEVER count as project coverage
+    expect(rg.covered_project_specific).not.toContain("pc");
+    expect(rg.covered_project_specific).not.toContain("myorg");
+  });
+
+  it("v1 registry (no v2 fields) → entity_type=project, lineage=[], reuse_scope=null", () => {
+    const root = setupFactory({ neurons: [{ cat: "errors", id: "NE-001", project: "alpha" }], repos: ["alpha"] });
+    const reg = loadRegistry(writeRegistryFile([{ project_id: "alpha", status: "active", aliases: ["alpha"] }]));
+    const rg = applyRegistryProjection(runProjectCoverage({ factoryRoot: root }), reg).registry!;
+    const e = rg.entities.find((x) => x.project_id === "alpha")!;
+    expect(e.entity_type).toBe("project");
+    expect(e.lineage).toEqual([]);
+    expect(e.reuse_scope).toBeNull();
+    expect(rg.entries_missing_entity_type).toContain("alpha");
+    expect(rg.entity_type_counts).toEqual({ project: 1 });
+  });
+
+  it("markdown documents that reuse_scope is NOT authZ", () => {
+    const root = setupFactory({ neurons: [{ cat: "errors", id: "NE-001", project: "alpha" }], repos: ["alpha"] });
+    const reg = loadRegistry(writeRegistryFile([{ project_id: "alpha", entity_type: "client", status: "active", reuse_scope: "tenant_private", aliases: ["alpha"] }]));
+    const md = renderMarkdown(applyRegistryProjection(runProjectCoverage({ factoryRoot: root }), reg));
+    expect(md).toMatch(/reuse_scope/);
+    expect(md).toMatch(/NOT access control|not authZ/i);
+  });
+});
