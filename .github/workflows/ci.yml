@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege: this workflow only reads the repo.
+permissions:
+  contents: read
+
+jobs:
+  build-test-gate:
+    name: build · test · audit · no-loss gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp-server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: mcp-server/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      # NOTE: blocking audit. A future upstream CVE can block unrelated PRs until
+      # the dependency is fixed. Kept blocking per operator request; move to a
+      # separate non-blocking job if it becomes noisy.
+      - name: Audit (prod deps)
+        run: npm audit --omit=dev
+
+      # GitHub Actions has no access to the real /factory/neurons corpus, so the
+      # gate runs against a small in-repo CI fixture + the REAL shipped registry
+      # (mcp-server/config/projects.json). This guards that the registry keeps
+      # resolving the critical tokens with no merges/splits/unexpected relabels.
+      # The real corpus is checked by the manual post-merge smoke.
+      - name: No-loss gate (registry vs seed, seed fallback ON)
+        run: npm --silent run no-loss-gate -- --neurons-dir ./test/fixtures/ci-corpus/neurons --registry ./config/projects.json --format md
+
+      # Guards the PR-3C-f precondition: the registry must still cover every token
+      # without falling back to the seed.
+      - name: No-loss gate (seed-less mode)
+        run: npm --silent run no-loss-gate -- --neurons-dir ./test/fixtures/ci-corpus/neurons --registry ./config/projects.json --no-seed-fallback --format md
