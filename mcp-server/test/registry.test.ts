@@ -111,3 +111,73 @@ describe("registry — validateRegistry returns the typed object", () => {
     expect(out.projects.length).toBe(3);
   });
 });
+
+describe("registry v2 — additive optional fields (backward-compatible)", () => {
+  it("v1 entries (no v2 fields) load unchanged and index normally", () => {
+    const reg = loadRegistry(writeRegistry({ version: 1, projects: [{ project_id: "a", status: "active", aliases: ["x"] }] }));
+    expect(reg.projectById.get("a")?.entity_type).toBeUndefined();
+    expect(reg.aliasToProject.get(normalizeToken("x"))).toBe("a");
+  });
+
+  it("accepts the new optional fields incl. status 'legacy'", () => {
+    const reg = loadRegistry(writeRegistry({
+      version: 1,
+      projects: [{
+        project_id: "a", status: "legacy", entity_type: "client", reuse_scope: "tenant_private",
+        owner_id: "org", parent_id: "org", tenant_id: "t1", lineage: ["paperclip"],
+      }],
+    }));
+    const p = reg.projectById.get("a")!;
+    expect(p.entity_type).toBe("client");
+    expect(p.reuse_scope).toBe("tenant_private");
+    expect(p.lineage).toEqual(["paperclip"]);
+  });
+
+  it("rejects invalid enums and malformed v2 fields", () => {
+    expect(() => loadRegistry(writeRegistry({ version: 1, projects: [{ project_id: "a", status: "active", entity_type: "galaxy" }] }))).toThrow(/entity_type must be one of/);
+    expect(() => loadRegistry(writeRegistry({ version: 1, projects: [{ project_id: "a", status: "active", reuse_scope: "public" }] }))).toThrow(/reuse_scope must be one of/);
+    expect(() => loadRegistry(writeRegistry({ version: 1, projects: [{ project_id: "a", status: "active", owner_id: "   " }] }))).toThrow(/owner_id must be a non-empty string/);
+    expect(() => loadRegistry(writeRegistry({ version: 1, projects: [{ project_id: "a", status: "active", lineage: "paperclip" }] }))).toThrow(/lineage must be a string\[\]/);
+    expect(() => loadRegistry(writeRegistry({ version: 1, projects: [{ project_id: "a", status: "live" }] }))).toThrow(/status must be one of/);
+  });
+
+  it("tolerates genuinely unknown fields (does not throw)", () => {
+    const reg = loadRegistry(writeRegistry({ version: 1, projects: [{ project_id: "a", status: "active", some_future_field: 42 }] }));
+    expect(reg.projectById.has("a")).toBe(true);
+  });
+
+  it("source_lineage entries are addressable but NEVER become project aliases (Paperclip rule)", () => {
+    const reg = loadRegistry(writeRegistry({
+      version: 1,
+      projects: [
+        { project_id: "jbcodingiot", status: "active", aliases: ["jbc"] },
+        { project_id: "paperclip", status: "legacy", entity_type: "source_lineage", aliases: ["paperclip-platform"] },
+      ],
+    }));
+    expect(reg.projectById.has("paperclip")).toBe(true); // still in the registry for reporting/lineage
+    expect(reg.aliasToProject.get(normalizeToken("paperclip"))).toBeUndefined(); // NOT a project alias
+    expect(reg.aliasToProject.get(normalizeToken("paperclip-platform"))).toBeUndefined();
+    expect(reg.aliasToProject.get(normalizeToken("jbc"))).toBe("jbcodingiot"); // real project still indexed
+  });
+
+  it("organization is a container: excluded from alias index; distinct ids coexist; colliding ids throw", () => {
+    const reg = loadRegistry(writeRegistry({
+      version: 1,
+      projects: [
+        { project_id: "jb-coding-iot-org", status: "active", entity_type: "organization" },
+        { project_id: "jbcodingiot", status: "active" },
+      ],
+    }));
+    expect(reg.projectById.has("jb-coding-iot-org")).toBe(true);
+    expect(reg.aliasToProject.get(normalizeToken("jb-coding-iot-org"))).toBeUndefined(); // org not an alias
+    expect(reg.aliasToProject.get(normalizeToken("jbcodingiot"))).toBe("jbcodingiot");
+    // company id and product token MUST be normalize-distinct, else it is a duplicate:
+    expect(() => loadRegistry(writeRegistry({
+      version: 1,
+      projects: [
+        { project_id: "jb-coding-iot", status: "active", entity_type: "organization" }, // normalizes to "jbcodingiot"
+        { project_id: "jbcodingiot", status: "active" },
+      ],
+    }))).toThrow(/duplicate project_id/);
+  });
+});

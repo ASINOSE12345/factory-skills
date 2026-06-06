@@ -13,7 +13,31 @@
 
 import { readFileSync, existsSync } from "node:fs";
 
-export type ProjectStatus = "active" | "archived" | "external";
+export type ProjectStatus = "active" | "archived" | "external" | "legacy";
+
+/** What a registry entry represents (registry v2 — additive/optional). */
+export type EntityType =
+  | "organization"
+  | "platform"
+  | "memory"
+  | "toolkit"
+  | "operating_system"
+  | "client"
+  | "project"
+  | "repo"
+  | "source_lineage";
+
+/**
+ * Reuse classification of a body of knowledge. This is NOT access control / authZ —
+ * the runtime must never treat it as a permission. It only describes how broadly a
+ * lesson may be *reused* (e.g. a redacted global pattern vs tenant-only memory).
+ */
+export type ReuseScope =
+  | "global"
+  | "tenant_private"
+  | "project_private"
+  | "internal"
+  | "public_pattern";
 
 export interface RegistryRepo {
   /** Local repo directory name (matched against discovered repos). */
@@ -35,6 +59,20 @@ export interface RegistryProject {
   aliases?: string[];
   /** Local repos that belong to this project. */
   repos?: RegistryRepo[];
+  // ── Registry v2 — all OPTIONAL and additive; v1 files omit these ───────────
+  /** What this entry represents. Omitted → treated as a project. */
+  entity_type?: EntityType;
+  /** Owning organization id. */
+  owner_id?: string;
+  /** Parent entity id (hierarchy: project → client/platform → organization). */
+  parent_id?: string;
+  /** Tenant/client this entry belongs to. */
+  tenant_id?: string;
+  /** Reuse classification — NOT access control (see ReuseScope). */
+  reuse_scope?: ReuseScope;
+  /** Source tools/spikes this knowledge derives from (e.g. ["paperclip"]).
+   *  Lineage only — a lineage entry is NEVER a neuron's owning project. */
+  lineage?: string[];
   note?: string;
 }
 
@@ -62,7 +100,17 @@ export interface LoadedRegistry {
   repoCollisions: Array<{ repo_id: string; project_ids: string[] }>;
 }
 
-const STATUSES: ReadonlySet<string> = new Set(["active", "archived", "external"]);
+const STATUSES: ReadonlySet<string> = new Set(["active", "archived", "external", "legacy"]);
+const ENTITY_TYPES: ReadonlySet<string> = new Set([
+  "organization", "platform", "memory", "toolkit", "operating_system", "client", "project", "repo", "source_lineage",
+]);
+const REUSE_SCOPES: ReadonlySet<string> = new Set([
+  "global", "tenant_private", "project_private", "internal", "public_pattern",
+]);
+/** Entity types that do NOT own neurons/repos. Excluded from the alias & repo
+ *  indexes so a lineage/organization entry can never become a project that a
+ *  neuron resolves to (enforces the ADR-0001 Paperclip rule structurally). */
+const NON_INDEXED_ENTITY_TYPES: ReadonlySet<string> = new Set(["source_lineage", "organization"]);
 
 /** Same normalization the neuron scope model uses (lowercase, strip separators). */
 export function normalizeToken(s: string): string {
@@ -89,8 +137,15 @@ export function validateRegistry(data: unknown): ProjectsRegistry {
     const norm = normalizeToken(pid);
     if (seen.has(norm)) fail(`duplicate project_id '${pid}'`);
     seen.add(norm);
-    if (typeof pr.status !== "string" || !STATUSES.has(pr.status)) fail(`projects[${i}] (${pid}).status must be one of active|archived|external`);
+    if (typeof pr.status !== "string" || !STATUSES.has(pr.status)) fail(`projects[${i}] (${pid}).status must be one of active|archived|external|legacy`);
     if (pr.is_global !== undefined && typeof pr.is_global !== "boolean") fail(`projects[${i}] (${pid}).is_global must be a boolean`);
+    // ── Registry v2 optional fields (additive) ───────────────────────────────
+    if (pr.entity_type !== undefined && (typeof pr.entity_type !== "string" || !ENTITY_TYPES.has(pr.entity_type))) fail(`projects[${i}] (${pid}).entity_type must be one of ${[...ENTITY_TYPES].join("|")}`);
+    if (pr.reuse_scope !== undefined && (typeof pr.reuse_scope !== "string" || !REUSE_SCOPES.has(pr.reuse_scope))) fail(`projects[${i}] (${pid}).reuse_scope must be one of ${[...REUSE_SCOPES].join("|")}`);
+    for (const k of ["owner_id", "parent_id", "tenant_id"] as const) {
+      if (pr[k] !== undefined && (typeof pr[k] !== "string" || (pr[k] as string).trim() === "")) fail(`projects[${i}] (${pid}).${k} must be a non-empty string`);
+    }
+    if (pr.lineage !== undefined && (!Array.isArray(pr.lineage) || pr.lineage.some((x) => typeof x !== "string"))) fail(`projects[${i}] (${pid}).lineage must be a string[]`);
     if (pr.aliases !== undefined) {
       if (!Array.isArray(pr.aliases) || pr.aliases.some((a) => typeof a !== "string")) fail(`projects[${i}] (${pid}).aliases must be a string[]`);
     }
@@ -118,7 +173,11 @@ export function indexRegistry(raw: ProjectsRegistry, path: string): LoadedRegist
   const repoOwners = new Map<string, Set<string>>();
 
   for (const p of raw.projects) {
-    projectById.set(p.project_id, p);
+    projectById.set(p.project_id, p); // every entry is addressable for reporting/hierarchy
+    // Lineage/organization entries are NOT neuron/repo owners → keep them out of
+    // the resolution indexes (so Paperclip-as-lineage never becomes a project alias).
+    const indexed = !p.entity_type || !NON_INDEXED_ENTITY_TYPES.has(p.entity_type);
+    if (!indexed) continue;
     for (const t of [p.project_id, ...(p.aliases ?? [])]) {
       const n = normalizeToken(t);
       if (!n) continue;
