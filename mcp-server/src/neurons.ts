@@ -251,7 +251,17 @@ function resolveAliasesFile(): string | null {
 /** Resolve the registry file path: env override → package-relative default. Null if absent. */
 function resolveRegistryFile(): string | null {
   const envFile = process.env.FACTORY_PROJECT_REGISTRY_FILE;
-  if (envFile) return existsSync(envFile) ? envFile : null;
+  if (envFile) {
+    if (existsSync(envFile)) return envFile;
+    // Explicitly configured but missing: this is almost certainly a misconfig, so
+    // make the safe degradation OBSERVABLE (warn once) instead of silent. An absent
+    // package default, by contrast, is a normal deployment variation → stay quiet.
+    if (!_registryWarned) {
+      _registryWarned = true;
+      console.warn(`[factory-neurons] FACTORY_PROJECT_REGISTRY_FILE points to a missing path: ${envFile} — falling back to external/seed aliases`);
+    }
+    return null;
+  }
   try {
     const def = fileURLToPath(new URL("../config/projects.json", import.meta.url));
     return existsSync(def) ? def : null;

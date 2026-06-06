@@ -1,14 +1,21 @@
 /**
- * no-loss-gate-cli — READ-ONLY safety contract for adopting the registry as the
- * alias source of truth (future PR-3C wiring of neurons.ts).
+ * no-loss-gate-cli — READ-ONLY safety contract guarding the registry as the alias
+ * source of truth.
  *
- * It proves that switching scope resolution from the seed (current `neurons.ts`)
- * to "registry alias → seed fallback" does NOT lose or mis-group knowledge:
+ * As of PR-3C-e the live `neurons.ts` resolver IS registry-aware
+ * (`canonicalProject`/`isGlobalScope` = registry → external → seed). This gate is
+ * the ongoing guard for that wiring (and for the future seed reduction, PR-3C-f):
+ * it proves that resolving scope via "registry alias → seed fallback" does NOT
+ * lose or mis-group knowledge versus the pre-registry seed behavior.
  *
- *   - It reads every distinct `project`/`scope` token in the corpus.
- *   - It resolves each token TWO ways:
- *       old  = current seed behavior        (isGlobalScope → "global", else canonicalProject)
- *       new  = registry alias → fallback    (what the wired neurons.ts would do)
+ * To keep its teeth, the gate must NOT compare the live resolver against itself.
+ * So it deliberately uses the registry-INDEPENDENT legacy resolvers
+ * (`canonicalProjectLegacy`/`isGlobalScopeLegacy`, seed + external, no registry)
+ * for the baseline — otherwise `old` and `new` would both be registry-driven and
+ * the comparison would be meaningless. It resolves each token TWO ways:
+ *       old  = legacy seed behavior   (isGlobalScopeLegacy → "global", else canonicalProjectLegacy)
+ *       new  = registry alias → legacy fallback   (what the wired live resolver does)
+ *
  *   - PARTITION: tokens grouped together under `old` must stay together under
  *     `new` (no SPLIT), and different `old` groups must never collapse into one
  *     `new` group (no MERGE).
@@ -21,12 +28,13 @@
  *   - CRITICAL: an explicit set of tokens must resolve to expected values.
  *
  * The `seedFallback` knob models the future seed-less mode (PR-3C-f): with it
- * OFF, `new` resolution does NOT consult the seed, so the gate reveals exactly
- * which tokens would regress if the seed were removed. GLOBAL_SCOPE_TOKENS
+ * OFF, `new` resolution does NOT consult the (legacy) seed, so the gate reveals
+ * exactly which tokens would regress if the seed were removed. GLOBAL_SCOPE_TOKENS
  * resolution is registry-independent and identical in both modes.
  *
  * Zero writes. Never touches the corpus. Imports `neurons.ts` helpers READ-ONLY
- * (does not modify neurons.ts); the live MCP scope resolution is unchanged.
+ * and uses the legacy resolvers, so running this gate never changes the live MCP
+ * scope resolution.
  */
 
 import { existsSync } from "node:fs";
