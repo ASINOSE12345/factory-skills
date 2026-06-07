@@ -41,6 +41,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { listNeurons, canonicalProjectLegacy, isGlobalScopeLegacy } from "./neurons.js";
+import { toolMetadata, toolMetadataMarkdown } from "./tool-metadata.js";
 import { loadRegistry, normalizeToken, type LoadedRegistry } from "./registry.js";
 
 /** A canonical-label transition that is KNOWN and intentional. Data, not magic
@@ -385,7 +386,14 @@ function main(): void {
       `unknown_reg=${report.unknown_regressions.length} merges=${report.merges.length} splits=${report.splits.length} ` +
       `critical_failures=${report.critical_failures.length}`,
   );
-  process.stdout.write(opts.format === "md" ? renderMarkdown(report) + "\n" : JSON.stringify(report, null, 2) + "\n");
+  // Attach run/trace metadata at the OUTPUT layer (the pure runNoLossGate report
+  // is unchanged; metadata describes the run, not the analysis).
+  const meta = toolMetadata();
+  process.stdout.write(
+    opts.format === "md"
+      ? renderMarkdown(report) + toolMetadataMarkdown(report.tool, meta) + "\n"
+      : JSON.stringify({ ...report, ...meta }, null, 2) + "\n",
+  );
   process.exit(report.pass ? 0 : 1);
 }
 
