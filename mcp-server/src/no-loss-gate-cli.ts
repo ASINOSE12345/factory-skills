@@ -16,13 +16,20 @@
  *       old  = legacy seed behavior   (isGlobalScopeLegacy → "global", else canonicalProjectLegacy)
  *       new  = registry alias → legacy fallback   (what the wired live resolver does)
  *
+ *   - NEWLY RESOLVED (growth, PASS): a token that was RAW/unrecognized under `old`
+ *     and is RESOLVED by the registry under `new` (e.g. `cartones` → `cartones-sa`).
+ *     This is healthy registry growth — recognizing a brand-new project — so it is
+ *     informational, never a failure. Classification precedence on `old !== new` is
+ *     allowlist → newly_resolved → unexpected_relabel.
  *   - PARTITION: tokens grouped together under `old` must stay together under
- *     `new` (no SPLIT), and different `old` groups must never collapse into one
- *     `new` group (no MERGE).
- *   - RELABELS: any `old !== new` transition must be on an explicit allowlist
- *     (`DEFAULT_ALLOWED_RELABELS`, overridable). Anything else is an
- *     `unexpected_relabel` → FAIL. (A relabel keeps grouping but changes the
- *     canonical label, e.g. `factoryos` → `factory-os`.)
+ *     `new` (no SPLIT), and ≥2 distinct old groups must never collapse into one
+ *     `new` group (no MERGE). A MERGE only counts old canonicals that were RESOLVED
+ *     under legacy — raw olds converging into a new registry project are growth
+ *     (newly_resolved), not knowledge mixing.
+ *   - RELABELS: an `old !== new` transition where BOTH are resolved must be on an
+ *     explicit allowlist (`DEFAULT_ALLOWED_RELABELS`, overridable). Anything else is
+ *     an `unexpected_relabel` → FAIL. The allowlist also pins specific historical
+ *     transitions (e.g. `factoryos` → `factory-os`) ahead of newly_resolved.
  *   - UNKNOWN REGRESSIONS: a token that resolved to a recognized project/global
  *     under `old` must not fall back to its raw, unrecognized form under `new`.
  *   - CRITICAL: an explicit set of tokens must resolve to expected values.
@@ -101,6 +108,7 @@ export interface NoLossGateReport {
   seed_fallback: boolean;
   total_tokens: number;
   allowed_relabels: TokenResolution[]; // old != new, on the allowlist (informational)
+  newly_resolved: TokenResolution[]; // raw/unrecognized old → registry-resolved new (informational, PASS — registry growth)
   unexpected_relabels: TokenResolution[]; // old != new, NOT on the allowlist → FAIL
   unknown_regressions: TokenResolution[]; // recognized under old, raw/unrecognized under new → FAIL
   merges: MergeFinding[]; // distinct old groups collapsing → FAIL
@@ -175,8 +183,11 @@ export function runNoLossGate(opts: NoLossGateOptions): NoLossGateReport {
   const resolutions: TokenResolution[] = [];
   const oldToTokens = new Map<string, Set<string>>();
   const oldToNew = new Map<string, Set<string>>();
-  const newToOld = new Map<string, Set<string>>();
+  // MERGE tracking counts ONLY old canonicals that were RESOLVED under legacy —
+  // raw olds converging into a new registry project are growth, not a merge.
+  const newToResolvedOld = new Map<string, Set<string>>();
   const allowed_relabels: TokenResolution[] = [];
+  const newly_resolved: TokenResolution[] = [];
   const unexpected_relabels: TokenResolution[] = [];
   const unknown_regressions: TokenResolution[] = [];
 
@@ -187,7 +198,12 @@ export function runNoLossGate(opts: NoLossGateOptions): NoLossGateReport {
     resolutions.push(res);
 
     if (oldS !== newS) {
-      (isAllowed(oldS, newS) ? allowed_relabels : unexpected_relabels).push(res);
+      // Precedence: explicit allowlist → newly_resolved (raw→resolved growth) → FAIL.
+      // The allowlist is a stronger, explicit marker (e.g. the historical
+      // factoryos → factory-os), so it wins even though that old is technically raw.
+      if (isAllowed(oldS, newS)) allowed_relabels.push(res);
+      else if (!isResolved(token, oldS) && isResolved(token, newS)) newly_resolved.push(res);
+      else unexpected_relabels.push(res);
     }
     if (isResolved(token, oldS) && !isResolved(token, newS)) {
       unknown_regressions.push(res);
@@ -197,8 +213,11 @@ export function runNoLossGate(opts: NoLossGateOptions): NoLossGateReport {
     oldToTokens.get(oldS)!.add(token);
     if (!oldToNew.has(oldS)) oldToNew.set(oldS, new Set());
     oldToNew.get(oldS)!.add(newS);
-    if (!newToOld.has(newS)) newToOld.set(newS, new Set());
-    newToOld.get(newS)!.add(oldS);
+    // Only RESOLVED-under-legacy old canonicals can constitute a dangerous merge.
+    if (isResolved(token, oldS)) {
+      if (!newToResolvedOld.has(newS)) newToResolvedOld.set(newS, new Set());
+      newToResolvedOld.get(newS)!.add(oldS);
+    }
   }
 
   // SPLIT: one old canonical maps to >1 new canonical (group fragmented).
@@ -208,9 +227,11 @@ export function runNoLossGate(opts: NoLossGateOptions): NoLossGateReport {
       splits.push({ old_canonical: oldC, new_canonicals: [...news].sort(), tokens: [...(oldToTokens.get(oldC) ?? [])].sort() });
     }
   }
-  // MERGE: one new canonical receives tokens from >1 old canonical (knowledge mixed).
+  // MERGE: ≥2 DISTINCT old canonicals that were RESOLVED under legacy collapse into
+  // one new canonical (real knowledge mixing). Raw/unrecognized olds converging into a
+  // new registry project are growth → newly_resolved, never a merge.
   const merges: MergeFinding[] = [];
-  for (const [newC, olds] of newToOld) {
+  for (const [newC, olds] of newToResolvedOld) {
     if (olds.size > 1) {
       const toks = resolutions.filter((r) => r.new === newC).map((r) => r.token).sort();
       merges.push({ new_canonical: newC, old_canonicals: [...olds].sort(), tokens: toks });
@@ -238,6 +259,7 @@ export function runNoLossGate(opts: NoLossGateOptions): NoLossGateReport {
     seed_fallback: seedFallback,
     total_tokens: tokens.size,
     allowed_relabels: allowed_relabels.sort(sortRes),
+    newly_resolved: newly_resolved.sort(sortRes),
     unexpected_relabels: unexpected_relabels.sort(sortRes),
     unknown_regressions: unknown_regressions.sort(sortRes),
     merges,
@@ -260,12 +282,17 @@ export function renderMarkdown(r: NoLossGateReport): string {
   L.push(`Result: **${r.pass ? "PASS ✅" : "FAIL ❌"}**  (seed_fallback=${r.seed_fallback})`);
   L.push("");
   L.push(`- Registry: \`${r.registry_path}\``);
-  L.push(`- Tokens: ${r.total_tokens} · allowed relabels: ${r.allowed_relabels.length} · unexpected: ${r.unexpected_relabels.length} · unknown regressions: ${r.unknown_regressions.length} · merges: ${r.merges.length} · splits: ${r.splits.length} · critical failures: ${r.critical_failures.length}`);
+  L.push(`- Tokens: ${r.total_tokens} · allowed relabels: ${r.allowed_relabels.length} · newly resolved: ${r.newly_resolved.length} · unexpected: ${r.unexpected_relabels.length} · unknown regressions: ${r.unknown_regressions.length} · merges: ${r.merges.length} · splits: ${r.splits.length} · critical failures: ${r.critical_failures.length}`);
   L.push("");
   L.push(`## Allowed relabels (on allowlist — informational)`);
   L.push("");
   if (r.allowed_relabels.length === 0) L.push(`_None._`);
   else tbl(r.allowed_relabels);
+  L.push("");
+  L.push(`## Newly resolved (informational — registry recognizes a token the seed did not; PASS)`);
+  L.push("");
+  if (r.newly_resolved.length === 0) L.push(`_None._`);
+  else tbl(r.newly_resolved);
   L.push("");
   L.push(`## Unexpected relabels (FAIL if any)`);
   L.push("");
@@ -382,7 +409,7 @@ function main(): void {
   }
   console.error(
     `[no-loss-gate] ${report.pass ? "PASS" : "FAIL"} (seed_fallback=${report.seed_fallback}) tokens=${report.total_tokens} ` +
-      `allowed=${report.allowed_relabels.length} unexpected=${report.unexpected_relabels.length} ` +
+      `allowed=${report.allowed_relabels.length} newly=${report.newly_resolved.length} unexpected=${report.unexpected_relabels.length} ` +
       `unknown_reg=${report.unknown_regressions.length} merges=${report.merges.length} splits=${report.splits.length} ` +
       `critical_failures=${report.critical_failures.length}`,
   );

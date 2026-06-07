@@ -92,13 +92,19 @@ describe("no-loss-gate — critical-token protection → FAIL when a registry dr
   });
 });
 
-describe("no-loss-gate — unexpected relabel (not on allowlist) → FAIL", () => {
-  it("flags a relabel that is not in DEFAULT_ALLOWED_RELABELS", () => {
-    const neuronsDir = setupNeurons([{ project: "alpha" }]); // seed: 'alpha' is self → unrecognized
-    const reg = writeReg([{ project_id: "alphaproj", status: "active", aliases: ["alpha"] }]); // alpha → alphaproj
+describe("no-loss-gate — unexpected relabel (resolved → different resolved) → FAIL", () => {
+  it("flags a RESOLVED→RESOLVED relabel that is not in DEFAULT_ALLOWED_RELABELS", () => {
+    // 'uv' is seed-resolved → urbanvistacapital; the registry remaps it to a DIFFERENT
+    // resolved project. That is real knowledge displacement, not growth → FAIL.
+    const neuronsDir = setupNeurons([{ project: "uv" }]);
+    const reg = writeReg([
+      { project_id: "otherproject", status: "active", aliases: ["uv"] },
+      { project_id: "factory-os", status: "active" }, // keep critical factory-os passing
+    ]);
     const r = runNoLossGate({ neuronsDir, registryPath: reg });
     expect(r.pass).toBe(false);
-    expect(r.unexpected_relabels.some((c) => c.token === "alpha" && c.new === "alphaproj")).toBe(true);
+    expect(r.unexpected_relabels.some((c) => c.token === "uv" && c.old === "urbanvistacapital" && c.new === "otherproject")).toBe(true);
+    expect(r.newly_resolved.some((c) => c.token === "uv")).toBe(false); // NOT growth
   });
 
   it("the same relabel PASSES when explicitly allowlisted (data, not code)", () => {
@@ -106,7 +112,7 @@ describe("no-loss-gate — unexpected relabel (not on allowlist) → FAIL", () =
     const reg = writeReg([{ project_id: "alphaproj", status: "active", aliases: ["alpha"] }]);
     const r = runNoLossGate({ neuronsDir, registryPath: reg, allowedRelabels: [{ from: "alpha", to: "alphaproj" }] });
     expect(r.unexpected_relabels).toEqual([]);
-    expect(r.allowed_relabels.some((c) => c.token === "alpha")).toBe(true);
+    expect(r.allowed_relabels.some((c) => c.token === "alpha")).toBe(true); // allowlist beats newly_resolved
     // (still fails overall only on critical tokens this minimal registry lacks — assert the relabel part)
   });
 });
@@ -126,6 +132,60 @@ describe("no-loss-gate — unknown regression (seed-less mode) → FAIL", () => 
     const reg = writeReg([{ project_id: "other", status: "active" }]);
     const r = runNoLossGate({ neuronsDir, registryPath: reg, seedFallback: true });
     expect(r.unknown_regressions).toEqual([]); // seed fallback keeps uv → urbanvistacapital
+  });
+});
+
+describe("no-loss-gate — growth-safe: raw → resolved is newly_resolved, not a failure (PR-B)", () => {
+  // A registry that recognizes critical factory-os so only the new project under test
+  // is the variable. Critical uv/ps/jbc still resolve via the seed fallback (default).
+  const baseProjects = [{ project_id: "factory-os", status: "active" }];
+
+  it("Cartones SA (1 alias): cartones → cartones-sa is newly_resolved and PASSes", () => {
+    const neuronsDir = setupNeurons([{ project: "cartones" }]);
+    const reg = writeReg([...baseProjects, { project_id: "cartones-sa", status: "active", aliases: ["cartones"] }]);
+    const r = runNoLossGate({ neuronsDir, registryPath: reg });
+    expect(r.pass).toBe(true);
+    expect(r.newly_resolved.some((c) => c.token === "cartones" && c.old === "cartones" && c.new === "cartones-sa")).toBe(true);
+    expect(r.unexpected_relabels).toEqual([]);
+    expect(r.merges).toEqual([]);
+  });
+
+  it("Cartones SA (2 aliases): both raw tokens → one new project, both newly_resolved, NO merge, PASS", () => {
+    const neuronsDir = setupNeurons([{ project: "cartones" }, { project: "cartonessa" }]);
+    const reg = writeReg([...baseProjects, { project_id: "cartones-sa", status: "active", aliases: ["cartones", "cartonessa"] }]);
+    const r = runNoLossGate({ neuronsDir, registryPath: reg });
+    expect(r.pass).toBe(true);
+    expect(r.merges).toEqual([]); // raw olds converging into a new project is NOT a merge
+    expect(r.newly_resolved.map((c) => c.token).sort()).toEqual(["cartones", "cartonessa"]);
+  });
+
+  it("factoryos → factory-os stays an allowed_relabel (allowlist beats newly_resolved), PASS", () => {
+    const neuronsDir = setupNeurons([{ project: "factory-os" }]);
+    const reg = writeReg([{ project_id: "factory-os", status: "active" }]);
+    const r = runNoLossGate({ neuronsDir, registryPath: reg });
+    expect(r.pass).toBe(true);
+    expect(r.allowed_relabels.some((c) => c.token === "factory-os" && c.old === "factoryos" && c.new === "factory-os")).toBe(true);
+    expect(r.newly_resolved.some((c) => c.token === "factory-os")).toBe(false); // allowlist precedence
+  });
+
+  it("a real MERGE of two RESOLVED seed canonicals still FAILs (refinement does not weaken merge)", () => {
+    const neuronsDir = setupNeurons([{ project: "uv" }, { project: "ps" }]);
+    const reg = writeReg([{ project_id: "merged", status: "active", aliases: ["uv", "ps"] }]);
+    const r = runNoLossGate({ neuronsDir, registryPath: reg });
+    expect(r.pass).toBe(false);
+    expect(r.merges.some((m) => m.new_canonical === "merged")).toBe(true);
+  });
+
+  it("a clean seed-covering registry produces NO newly_resolved (no spurious growth)", () => {
+    const neuronsDir = setupNeurons([{ project: "uv" }, { project: "ps" }, { scope: "factory" }]);
+    const reg = writeReg([
+      { project_id: "urbanvistacapital", status: "active", aliases: ["uv"] },
+      { project_id: "peoplesynapse", status: "active", aliases: ["ps"] },
+      { project_id: "factory-os", status: "active" },
+    ]);
+    const r = runNoLossGate({ neuronsDir, registryPath: reg });
+    expect(r.pass).toBe(true);
+    expect(r.newly_resolved).toEqual([]);
   });
 });
 
