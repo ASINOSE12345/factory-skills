@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import matter from "gray-matter";
-import { runPromote, verifyVectors, type PromoteDeps } from "../src/promote-staged-cli";
+import { runPromote, verifyVectors, renderManifestMd, type PromoteDeps } from "../src/promote-staged-cli";
 import { getApiKey } from "../src/embeddings";
 
 const roots: string[] = [];
@@ -214,5 +214,93 @@ describe("promote-staged — path containment & no forbidden deps", () => {
     const src = readFileSync(resolve("src/promote-staged-cli.ts"), "utf-8");
     expect(src).not.toMatch(/createNeuron/);
     expect(src).not.toMatch(/search_neurons|think_neurons|mcp__factory-neurons/);
+  });
+});
+
+describe("promote-staged — microfixes (physical containment, manifest-always, raw hash)", () => {
+  it("B1a. staging that resolves (via symlink) INSIDE neurons is blocked", async () => {
+    const { root, neuronsDir, proposedDir } = setup();
+    // real staging hidden inside neurons; stagingDir is a symlink to it
+    const hidden = join(neuronsDir, "hidden-staging");
+    mkdirSync(join(hidden, "proposed-neurons"), { recursive: true });
+    writeFileSync(join(hidden, "proposed-neurons", "PROPOSED-NE-x.md"), matter.stringify("# PROPOSED-NE-XXX: t", { type: "error-memory", id: "PROPOSED-NE-XXX" }));
+    const link = join(root, "staging-link");
+    symlinkSync(hidden, link);
+    void proposedDir;
+    const { manifest, exitCode } = await runPromote({ stagingDir: link, neuronsDir, apply: true, allowPendingEmbeddings: true }, { hasKey: () => false });
+    expect(exitCode).toBe(1);
+    expect(manifest.errors.join(" ")).toMatch(/INSIDE neurons/);
+  });
+
+  it("B1b. proposed-neurons being a symlink is blocked", async () => {
+    const { root, neuronsDir, stagingDir } = setup();
+    // replace proposed-neurons with a symlink
+    rmSync(join(stagingDir, "proposed-neurons"), { recursive: true, force: true });
+    const elsewhere = join(root, "elsewhere"); mkdirSync(elsewhere, { recursive: true });
+    symlinkSync(elsewhere, join(stagingDir, "proposed-neurons"));
+    const { manifest, exitCode } = await runPromote({ stagingDir, neuronsDir, apply: true, allowPendingEmbeddings: true }, { hasKey: () => false });
+    expect(exitCode).toBe(1);
+    expect(manifest.errors.join(" ")).toMatch(/symlink/);
+  });
+
+  it("B2a. embed runner THROWS after move => manifest embeddings_failed, files promoted, index intact", async () => {
+    const { root, neuronsDir, stagingDir, proposedDir } = setup();
+    writeFileSync(join(root, ".neuron-embeddings.json"), JSON.stringify({ model: "m", dimensions: 4, entries: { "NE-500.md": { vector: [1, 1, 1, 1] } } }));
+    const before = readFileSync(join(root, ".neuron-embeddings.json"), "utf-8");
+    writeProposed(proposedDir, "PROPOSED-NE-x", { type: "error-memory" }, "b");
+    const throwingEmbed: PromoteDeps["embed"] = async () => { throw new Error("gemini api down"); };
+    const { manifest, exitCode } = await runPromote({ stagingDir, neuronsDir, apply: true, allowPendingEmbeddings: false }, { hasKey: () => true, embed: throwingEmbed });
+    expect(exitCode).toBe(1);
+    expect(manifest.status).toBe("embeddings_failed");
+    expect(errFiles(neuronsDir).length).toBe(1); // file WAS promoted
+    expect(readFileSync(join(root, ".neuron-embeddings.json"), "utf-8")).toBe(before); // index intact
+    expect(existsSync(join(stagingDir, "PROMOTION-MANIFEST.json"))).toBe(true); // manifest written despite throw
+  });
+
+  it("B2b. a write failure during apply => manifest error written (no silent half-state)", async () => {
+    const { neuronsDir, stagingDir, proposedDir } = setup();
+    writeProposed(proposedDir, "PROPOSED-NE-x", { type: "error-memory" }, "b");
+    // make the errors/ dir read-only so the O_EXCL write throws EACCES
+    chmodSync(join(neuronsDir, "errors"), 0o500);
+    try {
+      const { manifest, exitCode } = await runPromote({ stagingDir, neuronsDir, apply: true, allowPendingEmbeddings: false }, { hasKey: () => true, embed: mockEmbed({ writeVecs: true }) });
+      expect(exitCode).toBe(1);
+      expect(manifest.status).toBe("error");
+      expect(existsSync(join(stagingDir, "PROMOTION-MANIFEST.json"))).toBe(true);
+    } finally {
+      chmodSync(join(neuronsDir, "errors"), 0o700); // allow cleanup
+    }
+  });
+
+  it("B3. corpusHash walks RAW .md (incl. invalid frontmatter): editing one changes the hash", async () => {
+    const { neuronsDir, stagingDir, proposedDir } = setup();
+    const bad = join(neuronsDir, "errors", "NE-900.md");
+    writeFileSync(bad, "---\n: not: valid: yaml\n---\nbody one"); // invalid frontmatter (listNeurons would drop it)
+    writeProposed(proposedDir, "PROPOSED-NE-x", { type: "error-memory" }, "b");
+    const r1 = await runPromote({ stagingDir, neuronsDir, apply: false, allowPendingEmbeddings: false });
+    writeFileSync(bad, "---\n: not: valid: yaml\n---\nbody TWO changed");
+    const r2 = await runPromote({ stagingDir, neuronsDir, apply: false, allowPendingEmbeddings: false });
+    expect(r1.manifest.corpus_hash_before).not.toBe(r2.manifest.corpus_hash_before); // raw walk caught the invalid-file change
+  });
+
+  it("minor. --format md renders a manifest summary", () => {
+    const md = renderManifestMd({
+      tool: "promote-staged", status: "success", generated_at: "2026-06-07T00:00:00Z", tool_version: "0.1.0", tool_git_sha: "abc",
+      staging_dir: "/s", neurons_dir: "/n", promoted: [{ source_file: "/s/p/PROPOSED-NE-x.md", slug: "PROPOSED-NE-x", category: "errors", id: "NE-700", dest_file: "/n/errors/NE-700.md", scope: "softwarefactory" }],
+      embeddings_attempted: true, embeddings_succeeded: ["NE-700"], embeddings_missing: [], index_backup_path: null,
+      corpus_hash_before: "aaaaaaaaaaaa0", corpus_hash_after: "bbbbbbbbbbbb0", warnings: [], errors: [],
+    });
+    expect(md).toMatch(/# Promotion — success/);
+    expect(md).toContain("NE-700");
+  });
+
+  it("minor. basic dedup warns when an existing neuron shares the title", async () => {
+    const { neuronsDir, stagingDir, proposedDir } = setup();
+    writeFileSync(join(neuronsDir, "errors", "NE-800.md"), matter.stringify("\n# NE-800: shared title here\n\nx\n", { type: "error-memory", id: "NE-800", status: "new" }));
+    writeProposed(proposedDir, "PROPOSED-NE-dup", { type: "error-memory" }, "body");
+    // make the proposed heading title match after transform
+    writeFileSync(join(proposedDir, "PROPOSED-NE-dup.md"), matter.stringify("\n# PROPOSED-NE-XXX: shared title here\n\nbody\n", { type: "error-memory", id: "PROPOSED-NE-XXX", status: "staging-proposed" }));
+    const { manifest } = await runPromote({ stagingDir, neuronsDir, apply: false, allowPendingEmbeddings: false });
+    expect(manifest.warnings.join(" ")).toMatch(/possible duplicate/i);
   });
 });

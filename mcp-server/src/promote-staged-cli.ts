@@ -3,8 +3,8 @@
  * with MANDATORY targeted embeddings, in ONE operation. Default is DRY-RUN; writing
  * requires an explicit `--apply`.
  *
- * Flow:  staging → validate → temp build → verify → O_EXCL move → targeted
- *        embeddings (only the promoted IDs) → internal index verification → manifest
+ * Flow:  staging → validate → temp build → verify → O_EXCL create in corpus →
+ *        targeted embeddings (only the promoted IDs) → internal index verification → manifest
  *
  * Why this exists: promoting neurons by hand (twice) left them in the corpus but
  * WITHOUT embeddings, so semantic ranking buried the night's best knowledge. This
@@ -14,7 +14,8 @@
  *
  * Guarantees / non-goals:
  *  - NO daemon, NO watcher, NO hooks, NO auto-promote. Human-triggered only.
- *  - NEVER uses create_neuron. Writes via temp → O_EXCL move (create-only).
+ *  - NEVER uses create_neuron. Builds + verifies in a temp dir, then writes each
+ *    destination with O_EXCL ('wx', create-only) — never clobbers an existing file.
  *  - NEVER calls the MCP tools (search/think). Retrieval verification is internal
  *    (vectors present in the index, correct dimension, non-zero). MCP smoke is a
  *    separate manual step.
@@ -23,8 +24,8 @@
  *  - Secret scan (redactSecrets) before any write; refuses on a detected secret.
  */
 
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { join, resolve, sep, basename } from "node:path";
+import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync, mkdtempSync, rmSync, realpathSync, lstatSync } from "node:fs";
+import { join, resolve, relative, sep, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
@@ -91,17 +92,36 @@ export interface PromoteDeps {
   log?: (line: string) => void;
 }
 
-const isInside = (child: string, parent: string): boolean => {
-  const c = resolve(child), p = resolve(parent);
+/** Resolve a path through symlinks (PHYSICAL). Uses the native resolver when available. */
+function realP(p: string): string {
+  const n = (realpathSync as unknown as { native?: (x: string) => string }).native;
+  return n ? n(p) : realpathSync(p);
+}
+/** Physical containment: BOTH paths resolved through symlinks, then compared. Lexical
+ *  resolve()/startsWith is NOT enough — a symlink could escape the contract (CP3 lesson
+ *  NP-059/NE-618/NE-619). Both paths must exist. */
+function physInside(child: string, parent: string): boolean {
+  const c = realP(child), p = realP(parent);
   return c === p || c.startsWith(p + sep);
-};
+}
+const isSymlink = (p: string): boolean => { try { return lstatSync(p).isSymbolicLink(); } catch { return false; } };
 
-/** sha256 over the sorted (relpath:contenthash) of every .md under neuronsDir. */
+/** sha256 over the sorted (relpath:sha256(content)) of EVERY .md under neuronsDir —
+ *  a RAW recursive walk (NOT listNeurons, which silently drops invalid frontmatter),
+ *  so the hash never lies. Symlinked subdirs are not descended (we never follow links
+ *  out of the corpus). Deterministic. */
 function corpusHash(neuronsDir: string): string {
-  const rows = listNeurons(neuronsDir)
-    .map((n) => `${n.category}/${n.filename}:${createHash("sha256").update(readFileSync(n.filepath)).digest("hex")}`)
-    .sort();
-  return createHash("sha256").update(rows.join("\n")).digest("hex");
+  if (!existsSync(neuronsDir)) return createHash("sha256").update("").digest("hex");
+  const out: string[] = [];
+  const walk = (d: string): void => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const fp = join(d, e.name);
+      if (e.isDirectory()) walk(fp);
+      else if (e.isFile() && e.name.endsWith(".md")) out.push(`${relative(neuronsDir, fp)}:${createHash("sha256").update(readFileSync(fp)).digest("hex")}`);
+    }
+  };
+  walk(neuronsDir);
+  return createHash("sha256").update(out.sort().join("\n")).digest("hex");
 }
 
 /** Next N contiguous numeric ids for a category (e.g. NE-632, NE-633, …). */
@@ -120,6 +140,8 @@ function nextIds(neuronsDir: string, cat: NeuronCategory, count: number): string
 
 const REAL_PROPOSED_LINK = /\[\[PROPOSED-(?:NE|ND|NP|NF|NB)-[A-Za-z0-9]/; // a real proposed-slug cross-link (NOT prose like [[PROPOSED-...]])
 const PLACEHOLDER_HEAD = /^#\s+PROPOSED-/m;
+/** Normalize a title for basic duplicate detection (strip leading id, punctuation, case). */
+const normTitle = (t: string): string => t.replace(/^(?:NE|ND|NP|NF|NB)[A-Za-z0-9-]*:\s*/i, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
 /** Build the promoted content for one staged neuron (frontmatter + body transforms). */
 function transform(raw: string, id: string, idMap: Map<string, string>): string {
@@ -160,8 +182,12 @@ export async function runPromote(opts: PromoteOptions, deps: PromoteDeps = {}): 
   if (!existsSync(opts.neuronsDir)) { errors.push(`neurons dir not found: ${opts.neuronsDir}`); return { manifest: mk("error", []), exitCode: 1 }; }
   const proposedDir = join(opts.stagingDir, "proposed-neurons");
   if (!existsSync(proposedDir)) { errors.push(`proposed-neurons not found under staging: ${proposedDir}`); return { manifest: mk("error", []), exitCode: 1 }; }
-  // Containment: staging MUST be outside the live corpus.
-  if (isInside(opts.stagingDir, opts.neuronsDir)) { errors.push(`staging dir is INSIDE neurons dir — refusing (containment)`); return { manifest: mk("error", []), exitCode: 1 }; }
+  // PHYSICAL containment (realpath, not lexical) — symlinks must not escape the contract.
+  if (isSymlink(proposedDir)) { errors.push(`proposed-neurons is a symlink — refusing (containment)`); return { manifest: mk("error", []), exitCode: 1 }; }
+  const neuronsReal = realP(opts.neuronsDir);
+  const stagingReal = realP(opts.stagingDir);
+  if (stagingReal === neuronsReal || stagingReal.startsWith(neuronsReal + sep)) { errors.push(`staging dir resolves INSIDE neurons dir — refusing (containment)`); return { manifest: mk("error", []), exitCode: 1 }; }
+  if (neuronsReal.startsWith(stagingReal + sep)) { errors.push(`neurons dir resolves INSIDE staging dir — refusing (containment)`); return { manifest: mk("error", []), exitCode: 1 }; }
 
   const corpusBefore = corpusHash(opts.neuronsDir);
   const files = readdirSync(proposedDir).filter((f) => f.endsWith(".md")).sort();
@@ -172,6 +198,7 @@ export async function runPromote(opts: PromoteOptions, deps: PromoteDeps = {}): 
   const parsed: Parsed[] = [];
   for (const f of files) {
     const source = join(proposedDir, f);
+    if (isSymlink(source)) { errors.push(`${f}: proposed file is a symlink — refusing`); continue; }
     const raw = readFileSync(source, "utf-8");
     const { data } = matter(raw);
     const type = String((data as Record<string, unknown>).type ?? "");
@@ -196,7 +223,9 @@ export async function runPromote(opts: PromoteOptions, deps: PromoteDeps = {}): 
   }
 
   // ── Build transformed content + validate ──────────────────────────────────
-  const corpusIds = new Set(listNeurons(opts.neuronsDir).map((n) => extractNeuronId(n.filename)));
+  const corpus = listNeurons(opts.neuronsDir);
+  const corpusIds = new Set(corpus.map((n) => extractNeuronId(n.filename)));
+  const existingTitles = new Set(corpus.map((n) => normTitle(n.title)));
   const promotedIds = new Set(items.map((it) => it.id.toUpperCase()));
   const built = new Map<string, string>(); // id → content
   for (const it of items) {
@@ -212,7 +241,10 @@ export async function runPromote(opts: PromoteOptions, deps: PromoteDeps = {}): 
     if (!isValidNeuronId(it.id)) errors.push(`${it.slug}: assigned id '${it.id}' is not a valid neuron id`);
     // overwrite guard
     if (existsSync(it.dest_file)) errors.push(`${it.id}: destination already exists — refusing overwrite`);
-    if (!isInside(it.dest_file, opts.neuronsDir)) errors.push(`${it.id}: destination escapes neurons dir`);
+    if (!resolve(it.dest_file).startsWith(resolve(opts.neuronsDir) + sep)) errors.push(`${it.id}: destination escapes neurons dir (lexical)`); // physical containment enforced at write
+    // dedup (basic, warn-only): same normalized title as an existing corpus neuron
+    const dupTitle = content.match(/^#\s+\S+:\s*(.+)$/m)?.[1] ?? "";
+    if (dupTitle && existingTitles.has(normTitle(dupTitle))) warnings.push(`${it.id}: possible duplicate — an existing neuron shares the title "${dupTitle}"`);
     // cross-link resolvability (warn, not block): neuron-id links must resolve
     for (const m of content.matchAll(/\[\[((?:NE|ND|NP|NF|NB)[A-Za-z0-9-]*)\]\]/g)) {
       const tgt = extractNeuronId(m[1]);
@@ -220,59 +252,61 @@ export async function runPromote(opts: PromoteOptions, deps: PromoteDeps = {}): 
     }
     built.set(it.id, content);
   }
-  if (errors.length) return { manifest: mk("error", items), exitCode: 1 };
-
-  // ── DRY-RUN: plan + manifest PREVIEW (no writes, no API) ───────────────────
+  // ── DRY-RUN: plan preview (no writes, no API, NO manifest) ──────────────────
   if (!opts.apply) {
-    log(`[promote-staged] DRY-RUN: ${items.length} to promote → ${items.map((i) => i.id).join(", ")}`);
+    if (errors.length) return { manifest: mk("error", items, { corpus_hash_before: corpusBefore, corpus_hash_after: corpusBefore }), exitCode: 1 };
+    log(`[promote-staged] DRY-RUN: ${items.length} → ${items.map((i) => i.id).join(", ")}`);
     log(`[promote-staged] embeddings would target: ${items.map((i) => i.id).join(", ")}`);
     return { manifest: mk("dry-run", items, { corpus_hash_before: corpusBefore, corpus_hash_after: corpusBefore }), exitCode: 0 };
   }
 
-  // ── APPLY ─────────────────────────────────────────────────────────────────
-  const hasKey = (deps.hasKey ?? (() => !!getApiKey()))();
-  if (!hasKey && !opts.allowPendingEmbeddings) {
-    errors.push(`no Gemini credentials (env GEMINI_API_KEY or keyfile) — refusing to promote without embeddings; pass --allow-pending-embeddings to override`);
-    return { manifest: mk("error", items), exitCode: 1 };
-  }
-
-  // build in temp + verify, then O_EXCL move
-  const tmp = mkdtempSync(join(tmpdir(), "promote-"));
-  try {
-    for (const it of items) writeFileSync(join(tmp, `${it.id}.md`), built.get(it.id)!, "utf-8");
-    // verify temp once more (defense in depth)
-    for (const it of items) {
-      const c = readFileSync(join(tmp, `${it.id}.md`), "utf-8");
-      if (REAL_PROPOSED_LINK.test(c) || PLACEHOLDER_HEAD.test(c) || redactSecrets(c) !== c) {
-        errors.push(`${it.id}: temp verification failed`);
-      }
-    }
-    if (errors.length) return { manifest: mk("error", items, { corpus_hash_before: corpusBefore, corpus_hash_after: corpusBefore }), exitCode: 1 };
-    // pre-check no overwrite for ALL before writing ANY
-    for (const it of items) if (existsSync(it.dest_file)) { errors.push(`${it.id}: destination appeared — abort`); }
-    if (errors.length) return { manifest: mk("error", items, { corpus_hash_before: corpusBefore, corpus_hash_after: corpusBefore }), exitCode: 1 };
-    // move with O_EXCL (create-only)
-    for (const it of items) {
-      mkdirSync(join(opts.neuronsDir, it.category), { recursive: true });
-      writeFileSync(it.dest_file, built.get(it.id)!, { encoding: "utf-8", flag: "wx" });
-    }
-  } finally {
-    rmSync(tmp, { recursive: true, force: true });
-  }
-  log(`[promote-staged] promoted ${items.length} → ${items.map((i) => i.id).join(", ")}`);
-
-  // ── Targeted embeddings (ONLY the promoted ids) ───────────────────────────
-  let embStatus: PromotionManifest["status"] = "success";
+  // ── APPLY — a PROMOTION-MANIFEST.json is ALWAYS written from here, even on a
+  //    mid-way failure or thrown error: no half-state without traceability. ─────
+  let status: PromotionManifest["status"] = "success";
   let embedded: string[] = [];
   let missing: string[] = [];
   let backupPath: string | null = null;
   let attempted = false;
+  const written: string[] = [];
 
-  if (!hasKey) {
-    embStatus = "embeddings_pending";
-    missing = items.map((i) => i.id);
-    warnings.push(`PROMOTED WITHOUT EMBEDDINGS (--allow-pending-embeddings): ${missing.join(", ")} — run embeddings --ids before relying on semantic recall`);
-  } else {
+  const applyPhase = async (): Promise<void> => {
+    if (errors.length) { status = "error"; return; } // validation failed → manifest only, no writes
+    const hasKey = (deps.hasKey ?? (() => !!getApiKey()))();
+    if (!hasKey && !opts.allowPendingEmbeddings) {
+      errors.push(`no Gemini credentials (env GEMINI_API_KEY or keyfile) — refusing to promote without embeddings; pass --allow-pending-embeddings`);
+      status = "error"; return;
+    }
+    // Build + verify in a temp dir, then CREATE each destination with O_EXCL
+    // (flag 'wx', create-only) from the verified content — NOT a rename; O_EXCL
+    // guarantees we never clobber an existing neuron.
+    const tmp = mkdtempSync(join(tmpdir(), "promote-"));
+    try {
+      for (const it of items) writeFileSync(join(tmp, `${it.id}.md`), built.get(it.id)!, "utf-8");
+      for (const it of items) {
+        const c = readFileSync(join(tmp, `${it.id}.md`), "utf-8");
+        if (REAL_PROPOSED_LINK.test(c) || PLACEHOLDER_HEAD.test(c) || redactSecrets(c) !== c) errors.push(`${it.id}: temp verification failed`);
+      }
+      if (errors.length) { status = "error"; return; }
+      for (const it of items) if (existsSync(it.dest_file)) errors.push(`${it.id}: destination already exists — refusing overwrite`);
+      if (errors.length) { status = "error"; return; }
+      for (const it of items) {
+        const catDir = join(opts.neuronsDir, it.category);
+        mkdirSync(catDir, { recursive: true });
+        if (!physInside(catDir, neuronsReal)) { errors.push(`${it.id}: category dir escapes neurons dir (symlink)`); status = "error"; return; }
+        writeFileSync(join(realP(catDir), `${it.id}.md`), built.get(it.id)!, { encoding: "utf-8", flag: "wx" }); // O_EXCL
+        written.push(it.id);
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+    log(`[promote-staged] promoted ${written.length} → ${written.join(", ")}`);
+
+    // targeted embeddings (ONLY the promoted ids)
+    if (!(deps.hasKey ?? (() => !!getApiKey()))()) {
+      status = "embeddings_pending"; missing = items.map((i) => i.id);
+      warnings.push(`PROMOTED WITHOUT EMBEDDINGS (--allow-pending-embeddings): ${missing.join(", ")} — run embeddings --ids before relying on semantic recall`);
+      return;
+    }
     attempted = true;
     const runner = deps.embed ?? (async (ids, nd) => {
       const r = await runEmbeddings({ neuronsDir: nd, ids, dryRun: false, forceFull: false, forceRebuild: false }, { log });
@@ -280,24 +314,30 @@ export async function runPromote(opts: PromoteOptions, deps: PromoteDeps = {}): 
     });
     const r = await runner(items.map((i) => i.id), opts.neuronsDir);
     embedded = r.embedded; backupPath = r.backupPath;
-    // internal verification (NO MCP): vectors present, right dim, non-zero
-    const verified = verifyVectors(opts.neuronsDir, items.map((i) => i.id));
+    const verified = verifyVectors(opts.neuronsDir, items.map((i) => i.id)); // NO MCP — read index directly
     missing = items.map((i) => i.id).filter((id) => !verified.has(id));
-    if (!r.ok || missing.length > 0) {
-      embStatus = "embeddings_failed";
-      warnings.push(`embeddings incomplete — missing vectors for: ${missing.join(", ") || "(provider reported failure)"}`);
-    }
-  }
+    if (!r.ok || missing.length > 0) { status = "embeddings_failed"; warnings.push(`embeddings incomplete — missing: ${missing.join(", ") || "(provider failure)"}`); }
+  };
 
-  const corpusAfter = corpusHash(opts.neuronsDir);
-  const manifest = mk(embStatus, items, {
+  try {
+    await applyPhase();
+  } catch (e) {
+    errors.push(`apply failed: ${(e as Error).message}`);
+    if (status === "success") status = attempted ? "embeddings_failed" : "error";
+  }
+  if (written.length > 0 && written.length < items.length) warnings.push(`PARTIAL: wrote ${written.length}/${items.length}: [${written.join(", ")}]`);
+
+  const manifest = mk(status, items, {
     embeddings_attempted: attempted, embeddings_succeeded: embedded, embeddings_missing: missing,
-    index_backup_path: backupPath, corpus_hash_before: corpusBefore, corpus_hash_after: corpusAfter,
+    index_backup_path: backupPath, corpus_hash_before: corpusBefore, corpus_hash_after: corpusHash(opts.neuronsDir),
   });
-  // manifest ALWAYS written on --apply (incl. the half-state)
-  writeFileSync(join(opts.stagingDir, "PROMOTION-MANIFEST.json"), JSON.stringify(manifest, null, 2) + "\n", "utf-8");
-  log(`[promote-staged] status=${embStatus}; manifest written to ${join(opts.stagingDir, "PROMOTION-MANIFEST.json")}`);
-  return { manifest, exitCode: embStatus === "success" ? 0 : 1 };
+  try {
+    writeFileSync(join(opts.stagingDir, "PROMOTION-MANIFEST.json"), JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+    log(`[promote-staged] status=${status}; manifest written`);
+  } catch (e) {
+    log(`[promote-staged] WARN: could not write manifest: ${(e as Error).message}`);
+  }
+  return { manifest, exitCode: status === "success" ? 0 : 1 };
 }
 
 /** Read the live index and return the set of ids whose vector is present, correctly
@@ -315,6 +355,22 @@ export function verifyVectors(neuronsDir: string, ids: string[]): Set<string> {
     if (Array.isArray(v) && v.length === dim && dim > 0 && v.some((x) => Math.abs(x) > 1e-9)) ok.add(id);
   }
   return ok;
+}
+
+/** Render a manifest as a Markdown summary (for --format md). */
+export function renderManifestMd(m: PromotionManifest): string {
+  const L: string[] = [];
+  L.push(`# Promotion — ${m.status}`, "");
+  L.push(`- staging: \`${m.staging_dir}\``);
+  L.push(`- neurons: \`${m.neurons_dir}\``);
+  L.push(`- tool: v${m.tool_version} · sha \`${m.tool_git_sha}\` · ${m.generated_at}`);
+  L.push(`- corpus hash: \`${m.corpus_hash_before.slice(0, 12)}\` → \`${m.corpus_hash_after.slice(0, 12)}\``);
+  L.push(`- embeddings: attempted=${m.embeddings_attempted} succeeded=${m.embeddings_succeeded.length} missing=${m.embeddings_missing.length}`, "");
+  L.push(`## Promoted (${m.promoted.length})`, `| id | category | scope | source |`, `|---|---|---|---|`);
+  for (const p of m.promoted) L.push(`| ${p.id} | ${p.category} | ${p.scope} | ${basename(p.source_file)} |`);
+  if (m.warnings.length) { L.push("", `## Warnings`); for (const w of m.warnings) L.push(`- ${w}`); }
+  if (m.errors.length) { L.push("", `## Errors`); for (const e of m.errors) L.push(`- ${e}`); }
+  return L.join("\n") + "\n";
 }
 
 // ── CLI wrapper ─────────────────────────────────────────────────────────────
@@ -347,7 +403,7 @@ async function main(): Promise<void> {
   if (opts.help) { console.error(USAGE); process.exit(0); return; }
   if (!opts.stagingDir || !opts.neuronsDir) { console.error(`[promote-staged] --staging-dir and --neurons-dir are required`); console.error(USAGE); process.exit(1); return; }
   const { manifest, exitCode } = await runPromote(opts);
-  process.stdout.write(JSON.stringify(manifest, null, 2) + "\n");
+  process.stdout.write(opts.format === "md" ? renderManifestMd(manifest) : JSON.stringify(manifest, null, 2) + "\n");
   process.exit(exitCode);
 }
 
