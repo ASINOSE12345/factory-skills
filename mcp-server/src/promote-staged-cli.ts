@@ -325,6 +325,12 @@ export async function runPromote(opts: PromoteOptions, deps: PromoteDeps = {}): 
     errors.push(`apply failed: ${(e as Error).message}`);
     if (status === "success") status = attempted ? "embeddings_failed" : "error";
   }
+  // If embeddings failed (incl. a thrown runner that skipped the inline accounting),
+  // derive the missing set from the index so the manifest is always complete.
+  if (status === "embeddings_failed" && missing.length === 0) {
+    const verified = written.length ? verifyVectors(opts.neuronsDir, written) : new Set<string>();
+    missing = written.filter((id) => !verified.has(id));
+  }
   if (written.length > 0 && written.length < items.length) warnings.push(`PARTIAL: wrote ${written.length}/${items.length}: [${written.join(", ")}]`);
 
   const manifest = mk(status, items, {

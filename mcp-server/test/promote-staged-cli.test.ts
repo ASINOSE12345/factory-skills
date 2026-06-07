@@ -243,16 +243,22 @@ describe("promote-staged — microfixes (physical containment, manifest-always, 
     expect(manifest.errors.join(" ")).toMatch(/symlink/);
   });
 
-  it("B2a. embed runner THROWS after move => manifest embeddings_failed, files promoted, index intact", async () => {
+  it("A. embed runner THROWS (real exception) => no crash, manifest embeddings_failed, full traceability, index intact", async () => {
     const { root, neuronsDir, stagingDir, proposedDir } = setup();
     writeFileSync(join(root, ".neuron-embeddings.json"), JSON.stringify({ model: "m", dimensions: 4, entries: { "NE-500.md": { vector: [1, 1, 1, 1] } } }));
     const before = readFileSync(join(root, ".neuron-embeddings.json"), "utf-8");
     writeProposed(proposedDir, "PROPOSED-NE-x", { type: "error-memory" }, "b");
-    const throwingEmbed: PromoteDeps["embed"] = async () => { throw new Error("gemini api down"); };
+    const throwingEmbed: PromoteDeps["embed"] = async () => { throw new Error("boom from runner"); };
     const { manifest, exitCode } = await runPromote({ stagingDir, neuronsDir, apply: true, allowPendingEmbeddings: false }, { hasKey: () => true, embed: throwingEmbed });
-    expect(exitCode).toBe(1);
+    // CLI did not crash; it returned a result
+    expect(exitCode).not.toBe(0);
     expect(manifest.status).toBe("embeddings_failed");
-    expect(errFiles(neuronsDir).length).toBe(1); // file WAS promoted
+    const promotedId = manifest.promoted[0].id;
+    expect(manifest.promoted.map((p) => p.id)).toContain(promotedId); // promoted ids present
+    expect(manifest.embeddings_attempted).toBe(true);
+    expect(manifest.embeddings_missing).toContain(promotedId); // unembedded id recorded
+    expect([...manifest.errors, ...manifest.warnings].join(" ")).toMatch(/boom from runner/); // failure message captured
+    expect(existsSync(join(neuronsDir, "errors", `${promotedId}.md`))).toBe(true); // promoted file exists
     expect(readFileSync(join(root, ".neuron-embeddings.json"), "utf-8")).toBe(before); // index intact
     expect(existsSync(join(stagingDir, "PROMOTION-MANIFEST.json"))).toBe(true); // manifest written despite throw
   });
@@ -281,6 +287,37 @@ describe("promote-staged — microfixes (physical containment, manifest-always, 
     writeFileSync(bad, "---\n: not: valid: yaml\n---\nbody TWO changed");
     const r2 = await runPromote({ stagingDir, neuronsDir, apply: false, allowPendingEmbeddings: false });
     expect(r1.manifest.corpus_hash_before).not.toBe(r2.manifest.corpus_hash_before); // raw walk caught the invalid-file change
+  });
+
+  it("B. PARTIAL write failure INSIDE the move loop (>=1 written) => status error, manifest reports partial", async () => {
+    const { neuronsDir, stagingDir, proposedDir } = setup();
+    // two categories; decisions are written first (filename sort: ND < NE), errors fail
+    writeProposed(proposedDir, "PROPOSED-ND-a", { type: "decision-memory" }, "b");
+    writeProposed(proposedDir, "PROPOSED-NE-b", { type: "error-memory" }, "b");
+    chmodSync(join(neuronsDir, "errors"), 0o500); // 2nd write (errors) throws EACCES mid-loop
+    try {
+      const { manifest, exitCode } = await runPromote({ stagingDir, neuronsDir, apply: true, allowPendingEmbeddings: false }, { hasKey: () => true, embed: mockEmbed({ writeVecs: true }) });
+      expect(exitCode).toBe(1);
+      expect(manifest.status).toBe("error");
+      // first file (decisions) WAS written; errors was not
+      expect(readdirSync(join(neuronsDir, "decisions")).filter((f) => f.endsWith(".md")).length).toBe(1);
+      expect(errFiles(neuronsDir).length).toBe(0);
+      expect(manifest.warnings.join(" ")).toMatch(/PARTIAL: wrote 1\/2/); // partial recorded
+      expect(existsSync(join(stagingDir, "PROMOTION-MANIFEST.json"))).toBe(true);
+    } finally {
+      chmodSync(join(neuronsDir, "errors"), 0o700);
+    }
+  });
+
+  it("C. corpusHash walks MIS-NAMED .md (listNeurons skips by prefix): editing it changes the hash", async () => {
+    const { neuronsDir, stagingDir, proposedDir } = setup();
+    const misnamed = join(neuronsDir, "errors", "README.md"); // not an NE- file → listNeurons ignores it
+    writeFileSync(misnamed, "---\nstatus: new\n---\n# Readme\n\nversion one\n");
+    writeProposed(proposedDir, "PROPOSED-NE-x", { type: "error-memory" }, "b");
+    const r1 = await runPromote({ stagingDir, neuronsDir, apply: false, allowPendingEmbeddings: false });
+    writeFileSync(misnamed, "---\nstatus: new\n---\n# Readme\n\nversion TWO changed\n");
+    const r2 = await runPromote({ stagingDir, neuronsDir, apply: false, allowPendingEmbeddings: false });
+    expect(r1.manifest.corpus_hash_before).not.toBe(r2.manifest.corpus_hash_before); // mis-named file IS hashed
   });
 
   it("minor. --format md renders a manifest summary", () => {
