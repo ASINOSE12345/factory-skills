@@ -10,6 +10,7 @@ import { readFileSync, writeFileSync, existsSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import https from "node:https";
 import { listNeurons, type Neuron, type NeuronCategory } from "./neurons.js";
+import { loadGeminiKey, resolveKeyFile } from "./gemini-key.js";
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -29,8 +30,19 @@ interface EmbeddingCache {
 const GEMINI_MODEL = "gemini-embedding-001";
 const CACHE_FILENAME = ".neuron-embeddings.json";
 
-function getApiKey(): string | null {
-  return process.env.GEMINI_API_KEY || null;
+/**
+ * Resolve the Gemini API key: `GEMINI_API_KEY` env first, else the local keyfile
+ * via `loadGeminiKey()` (default ~/.config/factory/gemini.key). This unifies
+ * credential resolution across the live MCP runtime and the CLIs — previously the
+ * runtime only worked when the launch env happened to carry the key, while the
+ * CLIs (which run in a different shell) saw it unset even though the keyfile
+ * existed. Never logs the key. Exported so providers/CLIs share ONE resolver.
+ */
+export function getApiKey(): string | null {
+  const env = process.env.GEMINI_API_KEY;
+  if (env && env.length > 0) return env;
+  const r = loadGeminiKey(resolveKeyFile());
+  return r.ok ? (r.key ?? null) : null;
 }
 
 /**

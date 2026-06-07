@@ -16,6 +16,7 @@
     "embeddings": "node dist/embeddings-cli.js",
     "project-coverage": "node dist/project-coverage-cli.js",
     "no-loss-gate": "node dist/no-loss-gate-cli.js",
+    "promote-staged": "node dist/promote-staged-cli.js",
     "config:generate": "node scripts/gen-local-config.mjs",
     "config:validate": "node scripts/validate-local-config.mjs"
   },

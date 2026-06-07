@@ -36,7 +36,12 @@ describe("getProvider — registry", () => {
 });
 
 describe("hasCredentials — reads the right env, no leak", () => {
-  it("gemini reflects GEMINI_API_KEY", () => {
+  it("gemini reflects GEMINI_API_KEY (env path; keyfile fallback neutralized here)", () => {
+    // hasCredentials now resolves env OR keyfile (unified resolver). Point the
+    // keyfile at a missing path so this test isolates the ENV branch. The keyfile
+    // fallback itself is covered by promote-staged-cli.test.ts ("getApiKey falls
+    // back to the keyfile").
+    process.env.FACTORY_GEMINI_KEY_FILE = "/nonexistent/no-such-gemini-keyfile";
     delete process.env.GEMINI_API_KEY;
     expect(getProvider("gemini").hasCredentials()).toBe(false);
     process.env.GEMINI_API_KEY = "x-test";
