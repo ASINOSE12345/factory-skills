@@ -17,6 +17,7 @@
     "project-coverage": "node dist/project-coverage-cli.js",
     "no-loss-gate": "node dist/no-loss-gate-cli.js",
     "promote-staged": "node dist/promote-staged-cli.js",
+    "corpus-lint": "node dist/corpus-lint-cli.js",
     "config:generate": "node scripts/gen-local-config.mjs",
     "config:validate": "node scripts/validate-local-config.mjs"
   },
