@@ -43,6 +43,7 @@ import {
   type NeuronCategory,
 } from "./neurons.js";
 import { loadRegistry, NON_INDEXED_ENTITY_TYPES, type LoadedRegistry, type ProjectStatus } from "./registry.js";
+import { toolMetadata, toolMetadataMarkdown } from "./tool-metadata.js";
 
 // ── Constants / heuristics (documented, never silent) ───────────────────────
 
@@ -1128,7 +1129,14 @@ function main(): void {
         `unbound=${report.registry.repos_unbound.length}`,
     );
   }
-  process.stdout.write(opts.format === "md" ? renderMarkdown(report) + "\n" : JSON.stringify(report, null, 2) + "\n");
+  // Attach run/trace metadata at the OUTPUT layer (keeps the pure report builder
+  // unchanged; metadata describes the run, not the analysis).
+  const meta = toolMetadata();
+  process.stdout.write(
+    opts.format === "md"
+      ? renderMarkdown(report) + toolMetadataMarkdown(report.tool, meta) + "\n"
+      : JSON.stringify({ ...report, ...meta }, null, 2) + "\n",
+  );
   process.exit(0);
 }
 

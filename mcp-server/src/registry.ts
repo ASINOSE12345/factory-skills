@@ -2,9 +2,16 @@
  * registry.ts — read-only loader + validator for the declarative project registry
  * (`config/projects.json`).
  *
- * PR-3B scope: the registry EXISTS and can be MEASURED against (via the
- * project-coverage auditor's `--registry` flag), but is NOT wired into the live
- * MCP scope resolution — that adoption is PR-3C. This module performs zero writes.
+ * Wiring (as of PR-3C-e): the registry IS wired into live MCP scope resolution.
+ * `neurons.ts` consumes it as the PRIMARY alias layer, with external file + inline
+ * seed as fallback (`registry → external → seed`); a missing/invalid registry
+ * degrades cleanly to the legacy seed behavior. This module itself remains a pure
+ * read-only loader/validator — it performs zero writes and never resolves scopes.
+ *
+ * Indexing rules (ADR-0001): `organization` and `source_lineage` entries are
+ * addressable for reporting but are EXCLUDED from the alias/repo indexes, so they
+ * can never be a project a neuron resolves to. `reuse_scope` is a REUSE
+ * classification, NOT access control / authZ.
  *
  * Fail-closed: structural errors throw with a clear message (no silent fallback).
  * Semantic data issues the operator should fix (alias / repo collisions) are
