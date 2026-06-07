@@ -36,6 +36,7 @@ import matter from "gray-matter";
 import { classifyVerification, isPushCommand } from "./verification-matcher.js";
 import { redactSecrets } from "./redact.js";
 import { loadState as loadIronGatesState, saveState as saveIronGatesState } from "./iron-gates-state.js";
+import { liveWritesAllowed, LIVE_WRITE_DISABLED } from "./write-guard.js";
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -611,20 +612,32 @@ async function main() {
   // Check for dedup — does this error already exist?
   const existingId = findExistingNeuron(neuronsDir, errorSig.fingerprint);
 
+  // CONTAINMENT (PR-G6A): auto-capture is OBSERVE-ONLY by default. It still
+  // classifies, redacts, updates iron-gates state (Gate 2/5) and reports context,
+  // but it does NOT mutate the live corpus (createNeuron / bumpOccurrences / the
+  // embedding side-effect inside createNeuron) unless live writes are explicitly
+  // enabled — the same opt-in that governs the MCP write surface. This closes the
+  // hook back-door that wrote auto_captured stubs straight into the brain.
+  const canWrite = liveWritesAllowed();
   let outputMessage: string;
 
   if (existingId) {
-    // Bump occurrences on existing neuron
-    const newOcc = bumpOccurrences(neuronsDir, existingId);
-    outputMessage = `[auto-capture] Known error ${existingId} (occurrence #${newOcc}) — ${errorSig.title}`;
+    if (canWrite) {
+      // Bump occurrences on existing neuron (live write).
+      const newOcc = bumpOccurrences(neuronsDir, existingId);
+      outputMessage = `[auto-capture] Known error ${existingId} (occurrence #${newOcc}) — ${errorSig.title}`;
 
-    // Check if it should be promoted to a pattern
-    const promotion = checkPatternPromotion(neuronsDir, existingId, newOcc);
-    if (promotion) {
-      outputMessage += `\n${promotion}`;
+      // Read-only suggestion; only meaningful once we have a bumped count.
+      const promotion = checkPatternPromotion(neuronsDir, existingId, newOcc);
+      if (promotion) {
+        outputMessage += `\n${promotion}`;
+      }
+    } else {
+      // Observe-only: do NOT bump occurrences (no corpus mutation).
+      outputMessage = `[auto-capture] observe-only (${LIVE_WRITE_DISABLED}): known error ${existingId} would bump occurrences — ${errorSig.title}. Set FACTORY_ALLOW_LIVE_WRITES=true to enable live capture.`;
     }
-  } else {
-    // Create new neuron
+  } else if (canWrite) {
+    // Create new neuron (live write; also triggers the embedding side-effect).
     const body = `## What happened
 Command: \`${command.slice(0, 200)}\`
 Exit code: ${exitCode}
@@ -659,7 +672,7 @@ _Pending — to be filled after fix is verified_
     const neuronId = neuron.filename.replace(".md", "");
     outputMessage = `[auto-capture] New error neuron ${neuronId}: ${errorSig.title}`;
 
-    // Search for similar existing neurons to suggest connections
+    // Search for similar existing neurons to suggest connections (read-only).
     const similar = searchNeuronsSync(neuronsDir, errorSig.title, "errors");
     if (similar.length > 1) {
       const related = similar
@@ -671,6 +684,9 @@ _Pending — to be filled after fix is verified_
         outputMessage += `\nRelated neurons: ${related}`;
       }
     }
+  } else {
+    // Observe-only: do NOT create a neuron or trigger embeddings.
+    outputMessage = `[auto-capture] observe-only (${LIVE_WRITE_DISABLED}): would capture new error "${errorSig.title}" (fingerprint ${errorSig.fingerprint}). Set FACTORY_ALLOW_LIVE_WRITES=true to enable live capture.`;
   }
 
   // Output context for Claude
