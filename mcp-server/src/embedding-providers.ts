@@ -19,7 +19,7 @@
  */
 
 import { join, dirname } from "node:path";
-import { embedText } from "./embeddings.js";
+import { embedText, getApiKey } from "./embeddings.js";
 
 export type ProviderName = "gemini" | "openai" | "local";
 
@@ -100,7 +100,7 @@ export function getProvider(name: string, modelOverride?: string): EmbeddingProv
         name,
         model,
         dimensions,
-        hasCredentials: () => !!process.env.GEMINI_API_KEY,
+        hasCredentials: () => !!getApiKey(), // env GEMINI_API_KEY OR local keyfile
         embed: geminiEmbed(),
       };
     case "openai":
