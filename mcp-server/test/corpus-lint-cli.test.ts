@@ -293,3 +293,102 @@ describe("corpus-lint — arg parsing", () => {
     expect(p.format).toBe("json");
   });
 });
+
+describe("corpus-lint — superseded lifecycle (PR-lint)", () => {
+  // capture stdout so main() stays quiet + we can read the JSON it emits
+  function runMain(neuronsDir: string, strict: boolean): { code: number; report: LintReport } {
+    const args = ["--neurons-dir", neuronsDir, "--format", "json"];
+    if (strict) args.push("--strict");
+    const chunks: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as unknown as { write: (s: string) => boolean }).write = (s: string) => { chunks.push(s); return true; };
+    let code: number;
+    try { code = main(args); } finally { (process.stdout as unknown as { write: typeof orig }).write = orig; }
+    return { code, report: JSON.parse(chunks[chunks.length - 1]) as LintReport };
+  }
+  const FULL = { created: "2026-06-01", project: "softwarefactory", scope: "softwarefactory" };
+  const lint = (neuronsDir: string) => lintCorpus({ neuronsDir, top: 50, strictRequested: false });
+
+  it("1. auto_captured + status:new + pending → counts as pending debt", () => {
+    const { neuronsDir } = setup();
+    write(neuronsDir, "errors", "NE-001-stub.md", { ...FULL, status: "new", auto_captured: true }, "## Fix applied\n_Pending — to fill_");
+    const r = lint(neuronsDir);
+    expect(r.auto_capture.pending).toBe(1);
+    expect(r.auto_capture.superseded).toBe(0);
+    expect(r.auto_capture.count).toBe(1);
+  });
+
+  it("2. auto_captured superseded (valid by + reason absorbed) → NOT pending; counts as auto_captured_superseded", () => {
+    const { neuronsDir } = setup();
+    write(neuronsDir, "errors", "NE-010-parent.md", { ...FULL, status: "graduated" }, "# NE-010 parent\nbody");
+    write(neuronsDir, "errors", "NE-001-absorbed.md", { ...FULL, status: "superseded", superseded_by: "NE-010", superseded_on: "2026-06-09", superseded_reason: "absorbed", auto_captured: true }, "## Fix applied\n_Pending_");
+    const r = lint(neuronsDir);
+    expect(r.auto_capture.superseded).toBe(1);
+    expect(r.auto_capture.pending).toBe(0);
+    expect(r.superseded.total).toBe(1);
+    expect(r.summary.strict_critical_total).toBe(0);
+    const off = r.top_offenders.find((o) => o.file === "errors/NE-001-absorbed.md");
+    expect(off?.issues ?? []).not.toContain("auto_captured_stub");
+  });
+
+  it("3. superseded_by present though status not 'superseded' → considered superseded", () => {
+    const { neuronsDir } = setup();
+    write(neuronsDir, "errors", "NE-010-parent.md", { ...FULL, status: "new" }, "# parent");
+    write(neuronsDir, "errors", "NE-002-x.md", { ...FULL, status: "new", superseded_by: "NE-010", superseded_on: "2026-06-09", superseded_reason: "duplicate", auto_captured: true }, "body");
+    const r = lint(neuronsDir);
+    expect(r.superseded.total).toBe(1);
+    expect(r.auto_capture.superseded).toBe(1);
+    expect(r.auto_capture.pending).toBe(0);
+  });
+
+  it("4. status:superseded without superseded_by → critical; strict fails", () => {
+    const { neuronsDir } = setup();
+    write(neuronsDir, "errors", "NE-003-x.md", { ...FULL, status: "superseded", superseded_reason: "obsolete" }, "body");
+    const def = runMain(neuronsDir, false);
+    const strict = runMain(neuronsDir, true);
+    expect(def.report.superseded.missing_superseded_by).toBe(1);
+    expect(def.code).toBe(0);
+    expect(strict.code).toBe(1);
+  });
+
+  it("5. superseded_by → nonexistent id → critical; strict fails", () => {
+    const { neuronsDir } = setup();
+    write(neuronsDir, "errors", "NE-004-x.md", { ...FULL, status: "superseded", superseded_by: "NE-999", superseded_on: "2026-06-09", superseded_reason: "absorbed" }, "body");
+    const strict = runMain(neuronsDir, true);
+    expect(strict.report.superseded.by_unresolved).toBe(1);
+    expect(strict.code).toBe(1);
+  });
+
+  it("6. superseded without reason → WARNING only; default exit 0; strict does NOT fail", () => {
+    const { neuronsDir } = setup();
+    write(neuronsDir, "errors", "NE-010-parent.md", { ...FULL, status: "graduated" }, "# parent");
+    write(neuronsDir, "errors", "NE-005-x.md", { ...FULL, status: "superseded", superseded_by: "NE-010", superseded_on: "2026-06-09" }, "body");
+    const strict = runMain(neuronsDir, true);
+    expect(strict.report.superseded.reason_missing).toBe(1);
+    expect(strict.report.summary.strict_critical_total).toBe(0);
+    expect(strict.code).toBe(0);
+  });
+
+  it("7. superseded_reason invalid → critical; strict fails", () => {
+    const { neuronsDir } = setup();
+    write(neuronsDir, "errors", "NE-010-parent.md", { ...FULL, status: "graduated" }, "# parent");
+    write(neuronsDir, "errors", "NE-006-x.md", { ...FULL, status: "superseded", superseded_by: "NE-010", superseded_on: "2026-06-09", superseded_reason: "bogus" }, "body");
+    const strict = runMain(neuronsDir, true);
+    expect(strict.report.superseded.reason_invalid).toBe(1);
+    expect(strict.code).toBe(1);
+  });
+
+  it("8. real corpus smoke: read-only, broken_refs baseline, NP-047 warning not critical", () => {
+    const ND = "/Users/rafamastroianni/factory/neurons";
+    if (!existsSync(ND)) return; // CI-safe: skip when the live corpus is absent
+    const before = treeHash(ND);
+    const r = lint(ND);
+    expect(treeHash(ND)).toBe(before);                       // read-only
+    expect(r.references.broken_neuron_refs).toBe(3);         // baseline unchanged
+    expect(r.superseded.total).toBeGreaterThanOrEqual(1);    // NP-047
+    expect(r.superseded.samples).toContain("NP-047");
+    expect(r.superseded.reason_missing).toBeGreaterThanOrEqual(1); // NP-047 lacks reason → warning
+    expect(r.superseded.missing_superseded_by).toBe(0);      // NP-047 has superseded_by
+    expect(r.superseded.by_unresolved).toBe(0);              // NP-051 exists
+  });
+});
