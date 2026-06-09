@@ -43,7 +43,25 @@ const STRICT_CRITICAL_CODES = [
   "broken_neuron_refs",
   "staging_proposed_in_corpus",
   "organization_or_lineage_as_project",
+  "superseded_missing_superseded_by",
+  "superseded_by_unresolved",
+  "superseded_reason_invalid",
 ] as const;
+
+/** Valid superseded_reason values (superseded lifecycle contract). `absorbed` =
+ *  consolidated into superseded_by; `unsafe` = harmful to act on; etc.
+ *  `superseded_reason_missing` is a WARNING (legacy grace, e.g. NP-047) — it is
+ *  deliberately NOT in STRICT_CRITICAL_CODES. */
+const VALID_SUPERSEDED_REASONS = new Set(["absorbed", "obsolete", "duplicate", "unsafe", "other"]);
+
+// ── Pure superseded helpers (small, no new architecture) ───────────────────
+/** A neuron is superseded iff status==="superseded" OR superseded_by present.
+ *  Mirrors gap-analysis.ts::detectSuperseded so retrieval/lint/diagnostics agree. */
+function isSupersededFrontmatter(fm: Record<string, unknown>): boolean {
+  const status = String(fm.status ?? "").trim();
+  const by = String(fm.superseded_by ?? "").trim();
+  return status === "superseded" || by.length > 0;
+}
 
 // ── Options & report shapes ────────────────────────────────────────────────
 export interface LintOptions {
@@ -105,9 +123,19 @@ export interface LintReport {
     samples_missing: string[];
   };
   auto_capture: {
-    count: number;
+    count: number;          // auto_captured_total: every auto_captured:true neuron (provenance)
+    pending: number;        // auto_captured_pending: auto_captured + status:new + pending marker (real debt)
+    superseded: number;     // auto_captured_superseded: auto_captured + superseded (NOT debt)
     by_status: Record<string, number>;
-    pending_fix_count: number;
+    pending_fix_count: number; // legacy/loose: non-superseded auto_captured with a 'pending' marker
+    samples: string[];
+  };
+  superseded: {
+    total: number;                 // every neuron that is superseded (any category)
+    missing_superseded_by: number; // critical
+    by_unresolved: number;         // critical: superseded_by → id not in corpus
+    reason_missing: number;        // WARNING (legacy grace, e.g. NP-047)
+    reason_invalid: number;        // critical: superseded_reason not in the enum
     samples: string[];
   };
   candidate_duplicates: { checked: boolean; note: string };
@@ -198,8 +226,14 @@ export function lintCorpus(opts: LintOptions, now: Date = new Date()): LintRepor
   const samples_unknown_scope: string[] = [];
 
   const ac_by_status: Record<string, number> = {};
-  let ac_pending = 0;
+  let ac_pending = 0, ac_pending_new = 0, ac_superseded = 0;
   const ac_samples: string[] = [];
+
+  // Superseded lifecycle counters.
+  let sup_total = 0, sup_missing_by = 0, sup_by_unresolved = 0, sup_reason_missing = 0, sup_reason_invalid = 0;
+  const sup_samples: string[] = [];
+  // All corpus ids (raw walk, incl. slugged filenames) — to resolve superseded_by targets.
+  const corpusIds = new Set(rawFiles.map((f) => extractNeuronId(f.basename)));
 
   const parseableNeurons: Neuron[] = [];
   const idToRelpath = new Map<string, string>();
@@ -248,13 +282,30 @@ export function lintCorpus(opts: LintOptions, now: Date = new Date()): LintRepor
     if (!status) { missing_status++; addIssue(f.relpath, id, "missing_status"); }
     status_distribution[status || "(none)"] = (status_distribution[status || "(none)"] ?? 0) + 1;
 
+    // Superseded lifecycle: status:superseded OR superseded_by present.
+    const supersededBy = String(fm.superseded_by ?? "").trim();
+    const isSuperseded = isSupersededFrontmatter(fm);
+    if (isSuperseded) {
+      sup_total++;
+      sup_samples.push(id);
+      if (!supersededBy) { sup_missing_by++; addIssue(f.relpath, id, "superseded_missing_superseded_by"); }
+      else if (!corpusIds.has(extractNeuronId(supersededBy))) { sup_by_unresolved++; addIssue(f.relpath, id, "superseded_by_unresolved"); }
+      const reason = String(fm.superseded_reason ?? "").trim();
+      if (!reason) { sup_reason_missing++; addIssue(f.relpath, id, "superseded_reason_missing"); } // WARNING (legacy grace, e.g. NP-047)
+      else if (!VALID_SUPERSEDED_REASONS.has(reason)) { sup_reason_invalid++; addIssue(f.relpath, id, "superseded_reason_invalid"); }
+    }
+
     const isAuto = fm.auto_captured === true;
     if (isAuto) {
       auto_captured++;
-      addIssue(f.relpath, id, "auto_captured_stub");
       ac_by_status[status || "(none)"] = (ac_by_status[status || "(none)"] ?? 0) + 1;
-      if (/pending/i.test(parsed.content)) ac_pending++;
       ac_samples.push(id);
+      if (isSuperseded) {
+        ac_superseded++; // consolidated/superseded evidence — NOT pending debt; no 'auto_captured_stub' issue
+      } else {
+        addIssue(f.relpath, id, "auto_captured_stub");
+        if (/pending/i.test(parsed.content)) { ac_pending++; if (status === "new") ac_pending_new++; }
+      }
     }
 
     const fmId = String(fm.id ?? "").trim().toUpperCase();
@@ -367,7 +418,8 @@ export function lintCorpus(opts: LintOptions, now: Date = new Date()): LintRepor
 
   const strict_critical_total =
     invalid_frontmatter + invalid_filename + unknown_category_file +
-    broken_count + staging_proposed_in_corpus + registry_consistency.organization_or_lineage_as_project;
+    broken_count + staging_proposed_in_corpus + registry_consistency.organization_or_lineage_as_project +
+    sup_missing_by + sup_by_unresolved + sup_reason_invalid;
 
   const cap = <T>(arr: T[]): T[] => arr.slice(0, opts.top);
   const dedupSorted = (arr: string[]): string[] => [...new Set(arr)].sort();
@@ -421,9 +473,19 @@ export function lintCorpus(opts: LintOptions, now: Date = new Date()): LintRepor
     },
     auto_capture: {
       count: auto_captured,
+      pending: ac_pending_new,
+      superseded: ac_superseded,
       by_status: sortedObj(ac_by_status),
       pending_fix_count: ac_pending,
       samples: cap(dedupSorted(ac_samples)),
+    },
+    superseded: {
+      total: sup_total,
+      missing_superseded_by: sup_missing_by,
+      by_unresolved: sup_by_unresolved,
+      reason_missing: sup_reason_missing,
+      reason_invalid: sup_reason_invalid,
+      samples: cap(dedupSorted(sup_samples)),
     },
     candidate_duplicates: { checked: false, note: "see dream-scan (mcp__factory-neurons__dream_scan)" },
     top_offenders: cap(offenders),
@@ -470,9 +532,14 @@ export function renderMarkdown(r: LintReport): string {
   if (r.scope.samples_unknown_scope.length) L.push(`- unknown-scope samples: ${r.scope.samples_unknown_scope.map((s) => `\`${s}\``).join(", ")}`);
   L.push("");
   L.push(`## Auto-captured stubs`);
-  L.push(`- count: ${r.auto_capture.count} · pending_fix: ${r.auto_capture.pending_fix_count}`);
+  L.push(`- total: ${r.auto_capture.count} · pending(new): ${r.auto_capture.pending} · superseded: ${r.auto_capture.superseded} · pending_fix(loose): ${r.auto_capture.pending_fix_count}`);
   L.push(`- by status: ${kv(r.auto_capture.by_status)}`);
   if (r.auto_capture.samples.length) L.push(`- samples: ${r.auto_capture.samples.map((s) => `\`${s}\``).join(", ")}`);
+  L.push("");
+  L.push(`## Superseded lifecycle`);
+  L.push(`- total superseded: ${r.superseded.total} · of which auto_captured: ${r.auto_capture.superseded}`);
+  L.push(`- issues: missing_superseded_by(critical) ${r.superseded.missing_superseded_by} · by_unresolved(critical) ${r.superseded.by_unresolved} · reason_missing(warning) ${r.superseded.reason_missing} · reason_invalid(critical) ${r.superseded.reason_invalid}`);
+  if (r.superseded.samples.length) L.push(`- samples: ${r.superseded.samples.map((s) => `\`${s}\``).join(", ")}`);
   L.push("");
   L.push(`## References`);
   L.push(`- broken_neuron_refs: ${r.references.broken_neuron_refs} · legacy_or_external: ${r.references.legacy_or_external_refs} · unknown: ${r.references.unknown_refs}`);
