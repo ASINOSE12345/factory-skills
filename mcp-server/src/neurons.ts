@@ -423,6 +423,21 @@ function filterByProject(neurons: Neuron[], project: string): Neuron[] {
   });
 }
 
+/** A neuron is superseded iff status==="superseded" OR superseded_by is present.
+ *  Mirrors corpus-lint / gap-analysis.detectSuperseded — one predicate, no drift,
+ *  no new status. */
+export function isSupersededNeuron(neuron: Neuron): boolean {
+  const fm = neuron.frontmatter;
+  return fm.status === "superseded" || fm.superseded_by != null;
+}
+
+/** Drop superseded neurons. Operational retrieval (search/think) excludes them by
+ *  default — superseded means "do not act on". get_neuron(id) and the diagnostic
+ *  tools (dream-scan / gap-analysis) keep seeing them via listNeurons. */
+function filterLiveNeurons(neurons: Neuron[]): Neuron[] {
+  return neurons.filter((n) => !isSupersededNeuron(n));
+}
+
 /**
  * A neuron with its retrieval scores attached.
  */
@@ -447,6 +462,7 @@ export async function searchNeuronsScored(
   project?: string,
 ): Promise<ScoredNeuron[]> {
   let all = listNeurons(neuronsDir, category);
+  all = filterLiveNeurons(all); // exclude superseded from operational retrieval (get_neuron stays unfiltered)
 
   if (project) {
     all = filterByProject(all, project);
@@ -512,6 +528,7 @@ export async function searchNeurons(
  */
 export function searchNeuronsSync(neuronsDir: string, query: string, category?: NeuronCategory, project?: string): Neuron[] {
   let all = listNeurons(neuronsDir, category);
+  all = filterLiveNeurons(all); // exclude superseded (operational retrieval)
   if (project) all = filterByProject(all, project);
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (terms.length === 0) return all;
