@@ -5,6 +5,7 @@ import {
   isPushCommand,
   hasUnguardedPipe,
   hasPipefail,
+  satisfiesPushVerificationPolicy,
 } from "../src/verification-matcher";
 
 // ─── Req 1: valid verifiers → { isVerification: true, safe: true } ───────────
@@ -13,11 +14,33 @@ describe("valid verifiers (isVerification && safe)", () => {
     "npm test",
     "npm run test",
     "npm run build",
+    "npm run lint",              // lint is whitelisted (no-eslint-disable policy)
     "npm --prefix mcp-server test",
     "npm --prefix ./some/path run test",
     "pnpm test",
+    "pnpm build",               // direct shorthand, no "run" prefix
+    "pnpm typecheck",
+    "pnpm lint",
     "pnpm --filter @scope/pkg test",
+    "pnpm --filter @scope/pkg build",        // was false-negative before fix
+    "pnpm --filter @scope/pkg typecheck",    // was false-negative before fix
+    "pnpm --filter @scope/pkg lint",         // was false-negative before fix
     "pnpm --filter @scope/pkg exec vitest",
+    "pnpm -r typecheck",        // recursive flag treated as BOOL_FLAG, sub="typecheck"
+    "pnpm --recursive typecheck",
+    "pnpm web:verify",          // workspace shorthand in DIRECT_VERIFIER_SCRIPTS
+    "pnpm test:contracts",      // test:* pattern
+    "pnpm run web:verify",      // same via "run" prefix
+    "pnpm run test:contracts",
+    // factory-os real commands from history
+    "pnpm --filter @factory-os/claude-code-cli-adapter test",
+    "pnpm --filter @factory-os/contracts test -- company-cost-overview.test.ts",
+    "pnpm --filter @factory-os/contracts exec vitest run engine-real-invocation.test.ts",
+    "pnpm --filter @factory-os/web lint",
+    "pnpm --filter @factory-os/web build",
+    "RUN_1A_PRIME=1 pnpm --filter @factory-os/contracts test -- x.test.ts",
+    "cd /workspace && pnpm --filter @factory-os/web build",
+    "npm --prefix mcp-server test",
     "npx tsc --noEmit",
     "tsc --noEmit", // no npx
     "vitest",
@@ -41,13 +64,17 @@ describe("valid verifiers (isVerification && safe)", () => {
 describe("false positives (not a verifier invocation)", () => {
   const FALSE_POS = [
     'git commit -m "fix vitest flakiness"',
+    'git commit -m "fix vitest"',         // from prompt B list
     'echo "run npm test"',
+    'echo "npm test"',
     'grep -r "playwright" .',
+    "rg vitest",                           // from prompt B list
     "cat npm-test-notes.md",
     "echo npm test", // head is echo, not a verifier
     "npm run dev", // non-whitelisted script
-    "npm run lint", // non-whitelisted script
     "ls -la test/", // live-bug shape: substring only
+    "node -e \"console.log('vitest')\"",   // from prompt B list — string argument, not invocation
+    "grep 'npm test' README.md",
   ];
   it.each(FALSE_POS)("false positive: %s", (cmd) => {
     const r = classifyVerification(cmd);
@@ -65,6 +92,8 @@ describe("unsafe (isVerification true, safe FALSE) — exit code can be masked",
     "npm test; echo done", // ; → exit is echo
     "playwright test build-info --reporter=line 2>&1 | tail -6", // exact live-bug class
     "bash -c 'npm test | tail'", // inner pipe, no pipefail
+    // from prompt B list — combined verify+push (isVerification=true but safeToCount=false via push guard)
+    // NOTE: these are also push commands; the gate blocks them via combined-command check
   ];
   it.each(UNSAFE)("unsafe: %s", (cmd) => {
     const r = classifyVerification(cmd);
@@ -130,11 +159,13 @@ describe("predicates", () => {
     expect(isVerificationCommand("npm --prefix x test")).toBe(true));
 });
 
-// ─── Contract: verification_passed ⇔ isVerification ∧ safe ∧ exit0 ∧ ¬push ───
+// ─── Contract: verification_passed ⇔ satisfiesPushVerificationPolicy ∧ exit0 ∧ ¬push ───
 describe("recording contract (pure-logic equivalent of updateIronGatesState)", () => {
+  // Mirrors the actual recordsVerificationPass implementation in auto-capture.ts:
+  //   satisfiesPushVerificationPolicy(verdict) && exitCode===0 && !isPushCommand
   const shouldRecord = (cmd: string, exitCode: number): boolean => {
     const v = classifyVerification(cmd);
-    return v.isVerification && v.safe && exitCode === 0 && !isPushCommand(cmd);
+    return satisfiesPushVerificationPolicy(v) && exitCode === 0 && !isPushCommand(cmd);
   };
   it("valid + exit 0 → record", () => expect(shouldRecord("npm test", 0)).toBe(true));
   it("valid + exit 1 → no record", () => expect(shouldRecord("npm test", 1)).toBe(false));
@@ -146,6 +177,8 @@ describe("recording contract (pure-logic equivalent of updateIronGatesState)", (
     expect(shouldRecord('echo "run npm test"', 0)).toBe(false));
   it("mixed verify+push + exit 0 → no record", () =>
     expect(shouldRecord("npm test && git push", 0)).toBe(false));
+  it("lint + exit 0 → no record (lint is verification but not push-gate kind)", () =>
+    expect(shouldRecord("npm run lint", 0)).toBe(false));
 });
 
 // ─── Shell-wrapper unwrapping — push must not hide inside a -c payload ────────
@@ -224,4 +257,193 @@ describe("indirect-execution bypass prevention", () => {
   const VERIFS = [`sudo npm test`, `(npm test)`, `nice -n 10 vitest`, `time npx tsc --noEmit`];
   it.each(VERIFS)("verification through prefix/grouping: %s", (cmd) =>
     expect(isVerificationCommand(cmd)).toBe(true));
+});
+
+// ─── Combined verify+push from prompt B list ─────────────────────────────────
+describe("combined verify+push (both predicates fire — gate must block)", () => {
+  it("pnpm test && git push → both predicates true", () => {
+    const cmd = "pnpm test && git push";
+    expect(isVerificationCommand(cmd)).toBe(true);
+    expect(isPushCommand(cmd)).toBe(true);
+  });
+  it("npx tsc --noEmit && gh pr create → both predicates true", () => {
+    const cmd = "npx tsc --noEmit && gh pr create";
+    expect(isVerificationCommand(cmd)).toBe(true);
+    expect(isPushCommand(cmd)).toBe(true);
+  });
+  it("pnpm --filter @factory-os/web lint && git push → both predicates true", () => {
+    const cmd = "pnpm --filter @factory-os/web lint && git push";
+    expect(isVerificationCommand(cmd)).toBe(true);
+    expect(isPushCommand(cmd)).toBe(true);
+  });
+});
+
+// ─── Kind classification ──────────────────────────────────────────────────────
+describe("kind classification (mechanism layer)", () => {
+  it("pnpm --filter X test → kind=test", () => {
+    const r = classifyVerification("pnpm --filter @factory-os/claude-code-cli-adapter test");
+    expect(r.isVerification).toBe(true);
+    expect(r.kind).toBe("test");
+    expect(r.safe).toBe(true);
+  });
+  it("pnpm --filter X build → kind=build", () => {
+    const r = classifyVerification("pnpm --filter @factory-os/web build");
+    expect(r.isVerification).toBe(true);
+    expect(r.kind).toBe("build");
+    expect(r.safe).toBe(true);
+  });
+  it("pnpm --filter X typecheck → kind=typecheck", () => {
+    const r = classifyVerification("pnpm --filter @factory-os/contracts typecheck");
+    expect(r.isVerification).toBe(true);
+    expect(r.kind).toBe("typecheck");
+    expect(r.safe).toBe(true);
+  });
+  it("pnpm --filter X lint → kind=lint, isVerification=true, safe=true", () => {
+    const r = classifyVerification("pnpm --filter @factory-os/web lint");
+    expect(r.isVerification).toBe(true);
+    expect(r.kind).toBe("lint");
+    expect(r.safe).toBe(true);
+  });
+  it("npm run lint → kind=lint", () => {
+    const r = classifyVerification("npm run lint");
+    expect(r.isVerification).toBe(true);
+    expect(r.kind).toBe("lint");
+    expect(r.safe).toBe(true);
+  });
+  it("npx tsc --noEmit → kind=typecheck", () => {
+    const r = classifyVerification("npx tsc --noEmit");
+    expect(r.isVerification).toBe(true);
+    expect(r.kind).toBe("typecheck");
+  });
+  it("tsc --noEmit (no npx) → kind=typecheck", () => {
+    const r = classifyVerification("tsc --noEmit");
+    expect(r.isVerification).toBe(true);
+    expect(r.kind).toBe("typecheck");
+  });
+  it("vitest run → kind=test", () => {
+    const r = classifyVerification("vitest run");
+    expect(r.isVerification).toBe(true);
+    expect(r.kind).toBe("test");
+  });
+  it("playwright test → kind=e2e", () => {
+    const r = classifyVerification("playwright test");
+    expect(r.isVerification).toBe(true);
+    expect(r.kind).toBe("e2e");
+  });
+  it("npm exec playwright test → kind=e2e", () => {
+    const r = classifyVerification("npm exec playwright test");
+    expect(r.isVerification).toBe(true);
+    expect(r.kind).toBe("e2e");
+  });
+  it("pnpm --filter X exec vitest run → kind=test", () => {
+    const r = classifyVerification("pnpm --filter @factory-os/contracts exec vitest run engine.test.ts");
+    expect(r.isVerification).toBe(true);
+    expect(r.kind).toBe("test");
+  });
+  it("non-verifier → kind=undefined", () => {
+    const r = classifyVerification('git commit -m "fix vitest"');
+    expect(r.isVerification).toBe(false);
+    expect(r.kind).toBeUndefined();
+  });
+});
+
+// ─── Push-gate policy (satisfiesPushVerificationPolicy) ──────────────────────
+describe("satisfiesPushVerificationPolicy (policy layer)", () => {
+  it("test kind → satisfies", () =>
+    expect(satisfiesPushVerificationPolicy(
+      classifyVerification("pnpm --filter @factory-os/claude-code-cli-adapter test")
+    )).toBe(true));
+  it("build kind → satisfies", () =>
+    expect(satisfiesPushVerificationPolicy(
+      classifyVerification("pnpm --filter @factory-os/web build")
+    )).toBe(true));
+  it("typecheck kind → satisfies", () =>
+    expect(satisfiesPushVerificationPolicy(
+      classifyVerification("npx tsc --noEmit")
+    )).toBe(true));
+  it("e2e kind → satisfies", () =>
+    expect(satisfiesPushVerificationPolicy(
+      classifyVerification("playwright test")
+    )).toBe(true));
+  it("lint kind → DOES NOT satisfy (lint is verification but not push-gate)", () =>
+    expect(satisfiesPushVerificationPolicy(
+      classifyVerification("pnpm --filter @factory-os/web lint")
+    )).toBe(false));
+  it("npm run lint → DOES NOT satisfy", () =>
+    expect(satisfiesPushVerificationPolicy(classifyVerification("npm run lint"))).toBe(false));
+  it("unsafe pipe → DOES NOT satisfy (safe=false)", () =>
+    expect(satisfiesPushVerificationPolicy(classifyVerification("vitest | tail"))).toBe(false));
+  it("non-verifier → DOES NOT satisfy", () =>
+    expect(satisfiesPushVerificationPolicy(classifyVerification('git commit -m "fix vitest"'))).toBe(false));
+});
+
+// ─── Recording contract — pnpm scoped real commands ──────────────────────────
+describe("recording contract — factory-os pnpm scoped commands", () => {
+  // Mirrors recordsVerificationPass(cmd, exitCode) from auto-capture.ts.
+  // Uses satisfiesPushVerificationPolicy so lint is correctly excluded.
+  const shouldRecord = (cmd: string, exitCode: number): boolean => {
+    const v = classifyVerification(cmd);
+    return satisfiesPushVerificationPolicy(v) && exitCode === 0 && !isPushCommand(cmd);
+  };
+
+  // Positivos: deben registrar verification_passed=true
+  it("pnpm --filter @factory-os/claude-code-cli-adapter test exit 0 → record", () =>
+    expect(shouldRecord("pnpm --filter @factory-os/claude-code-cli-adapter test", 0)).toBe(true));
+
+  it("pnpm --filter @factory-os/contracts test -- company-cost-overview.test.ts exit 0 → record", () =>
+    expect(shouldRecord("pnpm --filter @factory-os/contracts test -- company-cost-overview.test.ts", 0)).toBe(true));
+
+  it("pnpm --filter @factory-os/contracts exec vitest run engine-real-invocation.test.ts exit 0 → record", () =>
+    expect(shouldRecord("pnpm --filter @factory-os/contracts exec vitest run engine-real-invocation.test.ts", 0)).toBe(true));
+
+  it("pnpm --filter @factory-os/web build exit 0 → record", () =>
+    expect(shouldRecord("pnpm --filter @factory-os/web build", 0)).toBe(true));
+
+  it("RUN_1A_PRIME=1 pnpm --filter @factory-os/contracts test -- x.test.ts exit 0 → record", () =>
+    expect(shouldRecord("RUN_1A_PRIME=1 pnpm --filter @factory-os/contracts test -- x.test.ts", 0)).toBe(true));
+
+  // Lint: reconocida como verificación, NO registra push gate
+  it("pnpm --filter @factory-os/web lint exit 0 → DOES NOT record (lint ≠ push gate)", () =>
+    expect(shouldRecord("pnpm --filter @factory-os/web lint", 0)).toBe(false));
+
+  it("npm run lint exit 0 → DOES NOT record", () =>
+    expect(shouldRecord("npm run lint", 0)).toBe(false));
+
+  // Negativos generales
+  it("pnpm --filter @factory-os/web build exit 1 → no record (failed build)", () =>
+    expect(shouldRecord("pnpm --filter @factory-os/web build", 1)).toBe(false));
+
+  it("git commit -m 'fix vitest' exit 0 → no record (not a verifier)", () =>
+    expect(shouldRecord("git commit -m 'fix vitest'", 0)).toBe(false));
+
+  it("echo 'npm test' exit 0 → no record (not a verifier)", () =>
+    expect(shouldRecord("echo 'npm test'", 0)).toBe(false));
+
+  it("vitest | tail exit 0 → no record (unsafe pipe)", () =>
+    expect(shouldRecord("vitest | tail", 0)).toBe(false));
+
+  // Combined verify+push: no debe registrar (push guard en auto-capture)
+  it("pnpm test && git push exit 0 → no record (contains push)", () =>
+    expect(shouldRecord("pnpm test && git push", 0)).toBe(false));
+
+  it("npx tsc --noEmit && gh pr create exit 0 → no record (contains push)", () =>
+    expect(shouldRecord("npx tsc --noEmit && gh pr create", 0)).toBe(false));
+});
+
+// ─── Regression D: package-scoped test verde → push permitido ────────────────
+describe("regression: package-scoped test pass → push allowed", () => {
+  it("step 1: pnpm --filter X test exits 0 → shouldRecord=true (sets verification_passed)", () => {
+    const cmd = "pnpm --filter @factory-os/claude-code-cli-adapter test";
+    const v = classifyVerification(cmd);
+    expect(v.isVerification).toBe(true);
+    expect(v.safe).toBe(true);
+    expect(isPushCommand(cmd)).toBe(false);
+    // With exit 0, auto-capture would set verification_passed=true
+  });
+  it("step 2: git push -u origin feat/example → isPushCommand=true, NOT a verifier → gate checks state", () => {
+    const pushCmd = "git push -u origin feat/example";
+    expect(isPushCommand(pushCmd)).toBe(true);
+    expect(isVerificationCommand(pushCmd)).toBe(false);
+    // Iron Gate: if state.verification_passed=true (set by step 1), push is ALLOWED
+  });
 });

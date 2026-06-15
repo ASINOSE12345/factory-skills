@@ -14,6 +14,11 @@
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
+/** What KIND of verification a command performs.
+ *  Mechanism (what IS a verifier) is separate from policy (what SUFFICES for push).
+ *  "lint" is a valid verification kind but does not satisfy the push gate. */
+export type VerificationKind = "test" | "typecheck" | "lint" | "build" | "e2e";
+
 /** Result of classifying a Bash command for verification purposes. */
 export interface VerificationClassification {
   /** True if the command actually INVOKES a recognized verifier
@@ -24,6 +29,9 @@ export interface VerificationClassification {
    *  after the verifier can make the command exit 0 while the verifier failed
    *  (no `||`, no unguarded `|`, no `;`/newline with a later command). */
   safe: boolean;
+  /** What kind of verification this command performs. Present only when
+   *  isVerification=true. Used by satisfiesPushVerificationPolicy. */
+  kind?: VerificationKind;
   /** Actionable explanation, present when isVerification && !safe. */
   reason?: string;
 }
@@ -44,9 +52,43 @@ const VALUE_FLAGS = new Set(["--prefix", "--filter", "-w", "--workspace", "--wor
 const BOOL_FLAG = /^-/;
 
 /** Subcommands that, under a package manager, mean "run verification".
- *  `run <script>` only counts for whitelisted scripts so `npm run dev`/`lint`
- *  do NOT register. */
-const PM_RUN_SCRIPTS = new Set(["test", "build", "typecheck", "type-check", "tsc"]);
+ *  `run <script>` only counts for whitelisted scripts so `npm run dev`
+ *  does NOT register. "lint" is whitelisted: with no-eslint-disable policy
+ *  it catches real errors and is used as a CI gate. */
+const PM_RUN_SCRIPTS = new Set(["test", "build", "typecheck", "type-check", "tsc", "lint"]);
+
+/** Exact workspace shorthand scripts that count as verification.
+ *  Only add entries when the script name alone is a reliable signal
+ *  (no generic "run" prefix needed). */
+const DIRECT_VERIFIER_SCRIPTS = new Set(["web:verify", "test:contracts"]);
+
+/**
+ * True when `script` is a recognized verification script — either a canonical
+ * name, a known workspace shorthand, or a `test:*`/`test-*` pattern.
+ * Used for both `pnpm <script>` (direct invoke) and `pnpm run <script>`.
+ */
+function isVerifierScript(script: string): boolean {
+  if (PM_RUN_SCRIPTS.has(script)) return true;
+  if (DIRECT_VERIFIER_SCRIPTS.has(script)) return true;
+  // test:* and test-* project script conventions (e.g. test:contracts, test:unit)
+  if (/^test[:-]/.test(script)) return true;
+  return false;
+}
+
+/** Kind inferred from a direct verifier binary (tsc → typecheck, playwright → e2e, rest → test). */
+function binaryKind(bin: string): VerificationKind {
+  if (bin === "tsc") return "typecheck";
+  if (bin === "playwright") return "e2e";
+  return "test"; // vitest, jest, mocha, cypress
+}
+
+/** Kind inferred from a package-manager script name. */
+function scriptKind(script: string): VerificationKind {
+  if (script === "lint") return "lint";
+  if (script === "typecheck" || script === "type-check" || script === "tsc") return "typecheck";
+  if (script === "build") return "build";
+  return "test"; // test, web:verify, test:contracts, test:unit, etc.
+}
 
 /** Git flags that consume their next token (so we can skip `-C <dir>` etc.). */
 const GIT_VALUE_FLAGS = new Set(["-C", "--git-dir", "--work-tree", "--namespace", "-c"]);
@@ -176,16 +218,20 @@ function dequote(s: string): string {
 
 // ─── Verifier detection (one segment) ────────────────────────────────────────
 
-/** Does ONE segment invoke a verifier as its leading command? */
-function segmentIsVerifier(segment: string): boolean {
+/**
+ * Returns the verification kind if ONE segment invokes a verifier as its
+ * leading command, or null if it does not. Single source of truth for both
+ * `segmentIsVerifier` (bool wrapper) and `classifyVerification` (kind tagging).
+ */
+function segmentVerifierKind(segment: string): VerificationKind | null {
   const s = stripLeadingEnvAssignments(stripGrouping(segment));
   const tokens = skipExecPrefixes(tokenize(s));
-  if (tokens.length === 0) return false;
+  if (tokens.length === 0) return null;
 
   const head = basenameTok(tokens[0]);
 
   // Shape A: direct verifier binary (incl. `tsc --noEmit` without npx).
-  if (VERIFIER_BINARIES.includes(head)) return true;
+  if (VERIFIER_BINARIES.includes(head)) return binaryKind(head);
 
   // Shape B: package-manager front-end.
   if (PACKAGE_MANAGERS.includes(head)) {
@@ -196,28 +242,39 @@ function segmentIsVerifier(segment: string): boolean {
       if (BOOL_FLAG.test(t)) { i += 1; continue; }  // skip a no-arg flag
       break;
     }
-    if (i >= tokens.length) return false;
+    if (i >= tokens.length) return null;
     const sub = tokens[i];
     const subBin = basenameTok(sub);
 
     // npx/bun <verifier-binary>  e.g. `npx tsc --noEmit`, `bun vitest`
-    if ((head === "npx" || head === "bun") && VERIFIER_BINARIES.includes(subBin)) return true;
-    // npm/pnpm/yarn/bun test
-    if (sub === "test") return true;
-    // npm run <whitelisted-script>
+    if ((head === "npx" || head === "bun") && VERIFIER_BINARIES.includes(subBin)) {
+      return binaryKind(subBin);
+    }
+    // pnpm/npm/yarn/bun <verifier-script>  — direct shorthand, no "run" prefix
+    // Handles: pnpm test / pnpm build / pnpm typecheck / pnpm lint /
+    //          pnpm --filter X build / pnpm --filter X typecheck / pnpm --filter X lint /
+    //          pnpm web:verify / pnpm test:contracts / pnpm -r typecheck
+    if (isVerifierScript(sub)) return scriptKind(sub);
+    // npm run <whitelisted-script>  /  pnpm run <whitelisted-script>
     if (sub === "run") {
       const script = tokens[i + 1];
-      return !!script && PM_RUN_SCRIPTS.has(basenameTok(script));
+      if (script && isVerifierScript(basenameTok(script))) return scriptKind(basenameTok(script));
+      return null;
     }
     // npm/pnpm exec|dlx <verifier>
     if (sub === "exec" || sub === "dlx") {
       const bin = tokens[i + 1];
-      return !!bin && VERIFIER_BINARIES.includes(basenameTok(bin));
+      if (bin && VERIFIER_BINARIES.includes(basenameTok(bin))) return binaryKind(basenameTok(bin));
     }
-    return false;
+    return null;
   }
 
-  return false;
+  return null;
+}
+
+/** True if ONE segment invokes a recognized verifier as its leading command. */
+function segmentIsVerifier(segment: string): boolean {
+  return segmentVerifierKind(segment) !== null;
 }
 
 // ─── bash -c unwrapping ──────────────────────────────────────────────────────
@@ -377,6 +434,25 @@ function segmentIsPush(segment: string): boolean {
   return false;
 }
 
+// ─── Push-gate policy ────────────────────────────────────────────────────────
+
+/** Kinds that satisfy Gate 2 (push / PR / merge).
+ *  "lint" is intentionally absent: a lint pass does not guarantee correctness. */
+const PUSH_GATE_KINDS = new Set<VerificationKind>(["test", "typecheck", "build", "e2e"]);
+
+/**
+ * Policy gate: separates "is this a verifier?" (mechanism) from "does it
+ * suffice for push?" (policy). True only when the classification represents a
+ * real, pipe-safe verifier of an accepted kind.
+ *
+ * lint is verification but NOT policy-sufficient for push:
+ *   classifyVerification("pnpm --filter X lint")  → { isVerification:true, kind:"lint", safe:true }
+ *   satisfiesPushVerificationPolicy(above)         → false
+ */
+export function satisfiesPushVerificationPolicy(c: VerificationClassification): boolean {
+  return c.isVerification && c.safe && c.kind !== undefined && PUSH_GATE_KINDS.has(c.kind);
+}
+
 // ─── Reason message ──────────────────────────────────────────────────────────
 
 export const UNSAFE_VERIFICATION_REASON =
@@ -440,7 +516,10 @@ export function classifyVerification(command: string): VerificationClassificatio
 
   const safe = !hasUnsafeOr && (!hasTopPipe || pipefailActive) && !execAfterViaSequence;
 
+  // Determine kind from the last verifier segment (same index used for safety analysis).
+  const kind = segmentVerifierKind(segs[lastVerifierIdx].text) ?? undefined;
+
   return safe
-    ? { isVerification: true, safe: true }
-    : { isVerification: true, safe: false, reason: UNSAFE_VERIFICATION_REASON };
+    ? { isVerification: true, safe: true, kind }
+    : { isVerification: true, safe: false, kind, reason: UNSAFE_VERIFICATION_REASON };
 }

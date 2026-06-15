@@ -159,7 +159,12 @@ function gateVerificationBeforePush(
       return {
         decision: "block",
         reason: `⛔ IRON GATE: Cannot push/create PR without running tests first.\n` +
-                `Run one of: npm test, npm run build, npx vitest run, npx tsc --noEmit, npx playwright test\n` +
+                `Run one of (test / typecheck / build / e2e):\n` +
+                `  pnpm --filter <pkg> test          pnpm --filter <pkg> build\n` +
+                `  pnpm --filter <pkg> typecheck      npx tsc --noEmit\n` +
+                `  npm test / npm run build           npx vitest run\n` +
+                `  npx playwright test\n` +
+                `Note: lint alone does not satisfy this gate.\n` +
                 `Then retry the push.`,
       };
     }

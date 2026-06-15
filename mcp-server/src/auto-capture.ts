@@ -33,7 +33,7 @@ import {
   updatePatternCounter,
 } from "./neurons.js";
 import matter from "gray-matter";
-import { classifyVerification, isPushCommand } from "./verification-matcher.js";
+import { classifyVerification, isPushCommand, satisfiesPushVerificationPolicy } from "./verification-matcher.js";
 import { redactSecrets } from "./redact.js";
 import { loadState as loadIronGatesState, saveState as saveIronGatesState } from "./iron-gates-state.js";
 import { liveWritesAllowed, LIVE_WRITE_DISABLED } from "./write-guard.js";
@@ -501,7 +501,9 @@ function checkPatternPromotion(neuronsDir: string, neuronId: string, occurrences
  */
 export function recordsVerificationPass(command: string, exitCode: number): boolean {
   const verdict = classifyVerification(command);
-  return verdict.isVerification && verdict.safe && exitCode === 0 && !isPushCommand(command);
+  // satisfiesPushVerificationPolicy enforces the kind policy: lint counts as
+  // verification but does NOT satisfy the push gate (kind must be test/typecheck/build/e2e).
+  return satisfiesPushVerificationPolicy(verdict) && exitCode === 0 && !isPushCommand(command);
 }
 
 /**
