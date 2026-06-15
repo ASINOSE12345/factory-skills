@@ -124,6 +124,21 @@ describe("recordsVerificationPass — Gate 2 contract is fixed but NOT relaxed",
   it("does NOT record a pass for a non-verifier command that exited 0", () => {
     expect(recordsVerificationPass("cd repo && echo done", 0)).toBe(false);
   });
+
+  it("records a pass for scoped pnpm test (pnpm --filter pkg test, exit 0)", () => {
+    expect(recordsVerificationPass("pnpm --filter @factory-os/claude-code-cli-adapter test", 0)).toBe(true);
+  });
+
+  it("records a pass for npm --prefix scoped test", () => {
+    expect(recordsVerificationPass(
+      "npm --prefix /Users/dev/factory-skills/mcp-server test -- --run test/verification-matcher.test.ts",
+      0,
+    )).toBe(true);
+  });
+
+  it("does NOT record a pass for lint — lint is a verification kind but NOT a push-gate kind", () => {
+    expect(recordsVerificationPass("pnpm --filter @factory-os/web lint", 0)).toBe(false);
+  });
 });
 
 describe("isExpectedNegativeCheck — explicit marker, fail-closed", () => {

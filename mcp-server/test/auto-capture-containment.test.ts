@@ -157,4 +157,53 @@ describe("auto-capture containment — observe-only by default (PR-G6A)", () => 
     const state = JSON.parse(readFileSync(join(stateDir, stateFiles[0]), "utf8"));
     expect(state.last_verification_at).toBeTruthy();
   });
+
+  it("9. large PostToolUse payload (pnpm scoped test + big stdout) → verification_passed=true", () => {
+    // Regression: a 2s setTimeout used to race against large payloads, resolving the
+    // stdin Promise with partial JSON before EOF. The fix (await EOF, no timeout) means
+    // any payload size correctly sets verification_passed=true.
+    const { root, stateDir } = setup();
+    const input = {
+      session_id: "gate2-large",
+      cwd: root,
+      hook_event_name: "PostToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "pnpm --filter @factory-os/claude-code-cli-adapter test" },
+      tool_response: {
+        stdout: "✓ test line\n".repeat(3000), // ~36 KB — simulates a 161-test run
+        stderr: "",
+      },
+    };
+    const env: NodeJS.ProcessEnv = { ...process.env, FACTORY_STATE_DIR: stateDir };
+    delete env.FACTORY_ROOT;
+    delete env.FACTORY_ALLOW_LIVE_WRITES;
+    spawnSync("node", [DIST], { input: JSON.stringify(input), encoding: "utf8", env });
+    const stateFiles = readdirSync(stateDir).filter((f) => f.endsWith(".json"));
+    expect(stateFiles.length).toBeGreaterThan(0);
+    const state = JSON.parse(readFileSync(join(stateDir, stateFiles[0]), "utf8"));
+    expect(state.verification_passed).toBe(true);
+    expect(state.active_error).toBeNull();
+  });
+
+  it("10. lint-only PostToolUse (exit 0) → does NOT set verification_passed=true", () => {
+    // lint is a valid verification KIND but does NOT satisfy the push-gate POLICY
+    // (PUSH_GATE_KINDS = {test, typecheck, build, e2e} — lint excluded by design).
+    const { root, stateDir } = setup();
+    const input = {
+      session_id: "gate2-lint",
+      cwd: root,
+      hook_event_name: "PostToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "pnpm --filter @factory-os/web lint" },
+      tool_response: { stdout: "No lint errors.\n", stderr: "" },
+    };
+    const env: NodeJS.ProcessEnv = { ...process.env, FACTORY_STATE_DIR: stateDir };
+    delete env.FACTORY_ROOT;
+    delete env.FACTORY_ALLOW_LIVE_WRITES;
+    spawnSync("node", [DIST], { input: JSON.stringify(input), encoding: "utf8", env });
+    // lint + exit 0: updateIronGatesState is called but recordsVerificationPass=false
+    // and no errorFingerprint → no state file is written at all.
+    const stateFiles = readdirSync(stateDir).filter((f) => f.endsWith(".json"));
+    expect(stateFiles.length).toBe(0);
+  });
 });

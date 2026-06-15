@@ -540,14 +540,17 @@ function updateIronGatesState(
 // ─── Main ────────────────────────────────────────────────────
 
 async function main() {
-  // Read hook input from stdin
+  // Read hook input from stdin — wait for EOF, no timeout.
+  // Claude Code closes the write end of the pipe as soon as the full JSON is
+  // written, so `end` fires promptly regardless of payload size. A timeout
+  // races against large payloads (e.g. 161-test stdout in tool_response) and
+  // can resolve with partial JSON, silently discarding the event and leaving
+  // verification_passed=false even when the test suite passed.
   const inputRaw = await new Promise<string>((resolve) => {
     const chunks: Buffer[] = [];
     process.stdin.on("data", (chunk: Buffer) => chunks.push(chunk));
     process.stdin.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
     process.stdin.on("error", () => resolve(""));
-    // Timeout after 2s — don't block the hook
-    setTimeout(() => resolve(Buffer.concat(chunks).toString("utf-8")), 2000);
   });
 
   if (!inputRaw.trim()) {
@@ -558,7 +561,8 @@ async function main() {
   try {
     input = JSON.parse(inputRaw);
   } catch {
-    // Not valid JSON — exit silently
+    // Emit payload size to stderr for diagnostics (no content — may contain secrets).
+    process.stderr.write(`[auto-capture] JSON parse error — payload ${inputRaw.length} bytes\n`);
     process.exit(0);
   }
 
