@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+
+// chmod-based write-failure tests don't work when the process runs as root.
+const itAsNonRoot = it.skipIf(typeof process.getuid === "function" && process.getuid() === 0);
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -263,7 +266,7 @@ describe("promote-staged — microfixes (physical containment, manifest-always, 
     expect(existsSync(join(stagingDir, "PROMOTION-MANIFEST.json"))).toBe(true); // manifest written despite throw
   });
 
-  it("B2b. a write failure during apply => manifest error written (no silent half-state)", async () => {
+  itAsNonRoot("B2b. a write failure during apply => manifest error written (no silent half-state)", async () => {
     const { neuronsDir, stagingDir, proposedDir } = setup();
     writeProposed(proposedDir, "PROPOSED-NE-x", { type: "error-memory" }, "b");
     // make the errors/ dir read-only so the O_EXCL write throws EACCES
@@ -289,7 +292,7 @@ describe("promote-staged — microfixes (physical containment, manifest-always, 
     expect(r1.manifest.corpus_hash_before).not.toBe(r2.manifest.corpus_hash_before); // raw walk caught the invalid-file change
   });
 
-  it("B. PARTIAL write failure INSIDE the move loop (>=1 written) => status error, manifest reports partial", async () => {
+  itAsNonRoot("B. PARTIAL write failure INSIDE the move loop (>=1 written) => status error, manifest reports partial", async () => {
     const { neuronsDir, stagingDir, proposedDir } = setup();
     // two categories; decisions are written first (filename sort: ND < NE), errors fail
     writeProposed(proposedDir, "PROPOSED-ND-a", { type: "decision-memory" }, "b");
